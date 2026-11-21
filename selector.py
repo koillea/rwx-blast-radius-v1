@@ -379,10 +379,16 @@ class Selector:
         return blank(old_t) and blank(new_t) and ast.dump(old_t) == ast.dump(new_t)
 
     def expression_arg_types(self, f, stmt, owner):
-        """An edit to `arg_types` of an expression class C is visible only through C:
-        its instances (and subclasses'), or code that names C. Select tests that created
-        C or a subclass, tests that ran a function naming C, and, for import-time
-        references to C, every test of the file that holds them."""
+        """An edit to `arg_types` of an expression class C is visible only through:
+          * instances of C or of a subclass that inherits it (every read in sqlglot
+            goes through an instance: self/node/expression.arg_types, and the
+            required_args that __init_subclass__ derives from it is read the same way;
+            from_arg_list reads cls.arg_types and then instantiates cls);
+          * code that spells out C.arg_types / C.required_args;
+          * tests that name C at all.
+        A spelled-out read at import time inside another expression class's own
+        arg_types (e.g. TryCast copying Cast's) adds that class's observers; any other
+        import-time read selects the whole file holding it."""
         import ast
 
         if not self.class_use or not f.startswith("sqlglot/expressions/") or len(owner) != 1:
@@ -392,25 +398,55 @@ class Selector:
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
         if [getattr(t, "id", None) for t in targets] != ["arg_types"]:
             return None
-        cname = owner[0]
+        return self._arg_types_observers(f, owner[0], set())
+
+    def _arg_types_copier(self, g, line):
+        """(file, class) if `line` is inside `arg_types = ...` of a top-level class in g."""
+        import ast
+
+        if not g.startswith("sqlglot/expressions/"):
+            return None
+        tree = self._tree(g)
+        if tree is None:
+            return None
+        for n in tree.body:
+            if isinstance(n, ast.ClassDef) and n.lineno <= line <= n.end_lineno:
+                for b in n.body:
+                    if (isinstance(b, ast.Assign) and b.lineno <= line <= b.end_lineno
+                            and [getattr(t, "id", None) for t in b.targets] == ["arg_types"]):
+                        return n.name
+        return None
+
+    def _arg_types_observers(self, f, cname, seen):
+        if (f, cname) in seen:
+            return set()
+        seen.add((f, cname))
         sel = set(self.class_use.get(f"{f}::{cname}", ()))
         word = re.compile(r"\b" + re.escape(cname) + r"\b")
+        attr = re.compile(r"\b" + re.escape(cname) + r"\s*\.\s*(?:arg_types|required_args)\b")
         for g, glines in self._sources():
             for i, text in enumerate(glines, 1):
                 if cname not in text or not word.search(text):
                     continue
                 if text.strip().startswith("#") or self._in_docstring(g, i):
                     continue
-                if g == f and re.match(r"^\s*class\s+" + re.escape(cname) + r"\b", text):
-                    continue  # its own definition
                 if g.startswith("tests/"):
                     r = self._test_line(g, i)
                     if r is None:
                         return None
                     sel |= r
                     continue
+                if not attr.search(text):
+                    continue  # names C without reading its arg_types
                 u = self._unit_for(g, i)
                 if u is None or i < u[2]:
+                    copier = self._arg_types_copier(g, i)
+                    if copier is not None:
+                        r = self._arg_types_observers(g, copier, seen)
+                        if r is None:
+                            return None
+                        sel |= r
+                        continue
                     fl = self.file_level(g)
                     if fl is None:
                         return None

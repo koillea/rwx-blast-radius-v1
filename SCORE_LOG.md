@@ -24,5 +24,6 @@ Simulated = test seconds (busiest worker per commit) + worker seconds (2 s per w
 | v14 | `edd4829` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | **200.9** (200.14 + 0.71) | One-line lambdas (generator TRANSFORMS) |
 | v15 | `0af21bc` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.37 | - | Non-source files no test reads select nothing; sqlglotc/ -> test_sqlglotc; test-file helpers -> importers of that file, not all tests |
 
+| v16 | `HASH` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.43 | - | Added/deleted files handled exactly (deleted module -> its importers and users; added module -> nothing; deleted test file -> its tests and importers; deleted fixture -> readers) instead of all tests; validated on 6 cases against the full suite |
 Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit sample.
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).

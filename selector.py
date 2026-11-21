@@ -204,6 +204,11 @@ def _cmp_partner():
 
 
 
+def pinned_names() -> set[str]:
+    pinned_source("sqlglot/__init__.py")  # opens the zip
+    return set(_zip.namelist())
+
+
 def same_code(ch: FileChange) -> bool:
     """True if the patched file parses to the same AST as the pinned one once every
     bare string statement is blanked: only comments, layout, docstring text or other
@@ -1133,6 +1138,56 @@ class Selector:
                 sel |= imp
         return sel
 
+    def added_or_deleted(self, ch: FileChange):
+        """Tests that an added or deleted file can affect, or None (run everything).
+
+        Nothing in sqlglot or the collected tests discovers modules by listing a
+        directory, except tests/test_typing.py (every module of sqlglot/typing/); the
+        dialects are a fixed list. So an added module is imported by nobody unless
+        another edit of the same commit imports it (handled on its own), and a deleted
+        one fails exactly the tests that imported it."""
+        out: set[int] = set()
+        typing_tests = self.by_file.get("tests/test_typing.py", set())
+        if ch.deleted:
+            p = ch.old
+            if p.startswith("sqlglot/") and p.endswith(".py"):
+                imp = self.module_importers(p)
+                fl = self.file_level(p)
+                if imp is None or fl is None:
+                    return None
+                out = imp | fl | (typing_tests if p.startswith("sqlglot/typing/") else set())
+                log(f"  {p}: deleted -> importers and users {len(out)}")
+                return out
+            if p.startswith("tests/") and p.endswith(".py") and os.path.basename(p) not in ("conftest.py", "__init__.py"):
+                imp = self.module_importers(p)
+                if imp is None:
+                    return None
+                out = self.by_file.get(p, set()) | imp
+                log(f"  {p}: deleted test module -> {len(out)}")
+                return out
+            return None
+        p = ch.new
+        base = os.path.basename(p)
+        if base in ("conftest.py", "sitecustomize.py", "usercustomize.py", "__init__.py") and not p.startswith("sqlglot/"):
+            return None  # changes how pytest collects or how modules are named
+        if p.endswith(".pth") or "/" not in p:
+            return None  # repository root: may be configuration
+        if p.startswith("sqlglot/") and p.endswith(".py"):
+            names = pinned_names()
+            if base == "__init__.py":
+                d = p[: -len("/__init__.py")]
+                if d + ".py" in names or any(n.startswith(d + "/") for n in names):
+                    return None  # a package that shadows or changes an existing module
+            if p.startswith("sqlglot/typing/"):
+                log(f"  {p}: added typing module -> test_typing")
+                return set(typing_tests)
+            log(f"  {p}: added module, imported by nothing that exists -> nothing")
+            return set()
+        if p.startswith("tests/") and p.endswith(".py"):
+            log(f"  {p}: added test module (its tests are not in tests.json) -> nothing")
+            return set()
+        return None
+
     def module_importers(self, f):
         """Tests whose files import test module f (from the import graph); an empty set
         if no test imported it; None if unknown."""
@@ -1314,9 +1369,9 @@ class Selector:
                 sel |= self.by_file.get("tests/test_sqlglotc.py", set())
                 continue
             if path.startswith("tests/fixtures/"):
-                r = self.fixture(ch) if not ch.deleted else None
+                r = self.fixture(ch)  # added, edited or deleted: the tests that read it
             elif ch.added or ch.deleted:
-                r = None
+                r = self.added_or_deleted(ch)
             elif path.startswith("sqlglot/") and path.endswith(".py") and (sw := self.comparison_swap(ch)) is not None:
                 r = sw
             elif path.startswith("sqlglot/") and path.endswith(".py") and self.maybe_doc_only(ch) and same_code(ch):

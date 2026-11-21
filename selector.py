@@ -306,6 +306,11 @@ NO_EFFECT_DIRS = ("benchmarks/",)
 INSTANCE_READ_ATTRS = ("arg_types", "is_var_len_args", "is_primitive", "_hash_raw_args")
 
 
+class _Exact(set):
+    """A selection from probe records that already include import-time readers: it must
+    not be intersected with the file's runtime users."""
+
+
 class _Sets:
     """The maps' distinct test sets, turned into frozensets only when first used."""
 
@@ -373,6 +378,7 @@ class Selector:
         S = _Sets(m["sets"])  # each distinct test set, stored once, built on first use
         self._cmp = None
         self._dicts = None
+        self._attrs = None
         self.all = {t["number"] for t in tests}
         self.dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
@@ -515,6 +521,105 @@ class Selector:
             return hit == 1
 
         return blank(old_t) and blank(new_t) and ast.dump(old_t) == ast.dump(new_t)
+
+    # ------------------------------------------------------------ class constants
+    def _attr_map(self):
+        if self._attrs is None:
+            import marshal
+            import zlib
+
+            p = MAPS.parent / "attrs.bin.z"
+            self._attrs = marshal.loads(zlib.decompress(p.read_bytes())) if p.exists() else None
+        return self._attrs
+
+    def class_constant_reads(self, f, stmt, owner, ch):
+        """An edit of `NAME = ...` in class C (same statement, still assigning NAME) can
+        reach only code that reads NAME and gets C's definition. The flag probe
+        (build/attrprobe.py, maps/attrs.bin.z) recorded, per test, which class's
+        definition every `X.NAME` read in sqlglot resolved to, during imports too; where
+        NAME is only passed into a constructor that stores it unchanged, it recorded the
+        later uses of the stored attribute instead. None = rule does not apply."""
+        import ast
+
+        am = self._attr_map()
+        if am is None or not owner or not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            return None
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            return None
+        name = targets[0].id
+        if not re.match(r"^_?[A-Z][A-Z0-9_]{2,}$", name) or name in am["unknown"] or f not in am["files"]:
+            return None
+        pairs = self._stmt_pairs(f, ch)
+        if not pairs:
+            return None
+        new = next((y for x, y, p in pairs if x.lineno == stmt.lineno and list(p) == list(owner)), None)
+        if new is None or not isinstance(new, (ast.Assign, ast.AnnAssign)):
+            return None
+        nt = new.targets if isinstance(new, ast.Assign) else [new.target]
+        if len(nt) != 1 or not isinstance(nt[0], ast.Name) or nt[0].id != name:
+            return None
+        if not self._constant_read_paths_ok(name):
+            return None
+        sets = am["sets"]
+        key = f"{f}::{'.'.join(owner)}|{name}"
+        out: set[int] = set()
+        idx = am["reads"].get(key)
+        if idx == -1:
+            return None
+        if idx is not None:
+            out.update(sets[idx])
+        # values passed into a constructor that stores them: the stored attribute's uses
+        fed = self._feeding_keywords(name)
+        for kw, attr in am["passkw"].items():
+            if kw in fed:
+                j = am["pass"].get(attr)
+                if j == -1:
+                    return None
+                if j is not None:
+                    out.update(sets[j])
+        log(f"  {f}:{stmt.lineno} class constant {'.'.join(owner)}.{name} -> readers of that definition {len(out)}")
+        return _Exact(out)
+
+    def _probe_covers(self, f, names):
+        am = self._attr_map()
+        if am is None or f not in am["files"]:
+            return False
+        return all(re.match(r"^_?[A-Z][A-Z0-9_]{2,}$", n) and n not in am["unknown"]
+                   and self._constant_read_paths_ok(n) for n in names)
+
+    def _feeding_keywords(self, name):
+        pat = re.compile(r"\b(\w+)\s*=\s*[\w.]*\b" + re.escape(name) + r"\b")
+        out = set()
+        for g, gl in self._sources_with(name):
+            if g.startswith("sqlglot/"):
+                for line in gl:
+                    if name in line:
+                        out.update(pat.findall(line))
+        return out
+
+    def _constant_read_paths_ok(self, name):
+        """Every way NAME is read must be an attribute load the probe saw: no lookup by a
+        quoted name, and no bare-name use in a class body (outside its own definition)."""
+        quoted = re.compile(r"[\"']" + re.escape(name) + r"[\"']")
+        bare = re.compile(r"(?<![\w.])" + re.escape(name) + r"\b")
+        define = re.compile(r"^\s*" + re.escape(name) + r"\s*(:[^=]*)?(=(?!=)|$)")
+        for g, glines in self._sources_with(name):
+            if not g.startswith("sqlglot/"):
+                continue
+            for i, line in enumerate(glines, 1):
+                if name not in line:
+                    continue
+                code = line.split("#", 1)[0]
+                if quoted.search(code) and not self._in_docstring(g, i):
+                    log(f"    {name}: looked up by name at {g}:{i}")
+                    return False
+                if bare.search(code) and not define.match(code) and not self._in_docstring(g, i):
+                    u = self._unit_for(g, i)
+                    if u is None or i < u[2]:
+                        log(f"    {name}: bare-name use outside a function at {g}:{i}")
+                        return False
+        return True
 
     # ------------------------------------------------------------ dict entries
     def _dict_map(self):
@@ -849,6 +954,9 @@ class Selector:
         if dict_rule is not None:
             fl = self.file_level(f)
             return dict_rule & fl if fl is not None else dict_rule
+        flag_rule = self.class_constant_reads(f, stmt, owner, ch)
+        if flag_rule is not None:
+            return flag_rule
         if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
             return None
         if any(isinstance(x, (ast.Call, ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Await))
@@ -1196,6 +1304,10 @@ class Selector:
                     for n in ast.walk(t):
                         if isinstance(n, ast.Name):
                             names.add(n.id)
+            if path and self._probe_covers(f, names):
+                # every read of these class constants, during imports too, was recorded by
+                # the flag probe; class_constant_reads selects from those records
+                continue
             touched = set(self.touched.get(f"{f}::{'.'.join(path)}", ())) if path else None
             cword = re.compile(r"\b" + re.escape(path[-1]) + r"\b") if path else None
             for name in names:
@@ -1231,6 +1343,9 @@ class Selector:
                         log(f"  {f}: import-time exposure -> {len(exp_sel)}")
                     sel |= exp_sel
                 narrowed = self.class_level(f, line, ch)
+                if isinstance(narrowed, _Exact):
+                    sel |= narrowed  # probe records, import-time readers included: not intersected
+                    continue
                 if narrowed is not None:
                     fl = self.file_level(f)
                     # both are sound over-approximations: keep only what both require

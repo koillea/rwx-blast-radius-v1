@@ -38,3 +38,11 @@ rm -f dictprobe.json
 PYTHONPATH="$HERE" DICTPROBE_OUT="$PWD/dictprobe.json" MAPPLUGIN_OUT=/dev/null \
   python3 -m pytest tests/ -p mapplugin -p dictprobe -p no:cacheprovider -q
 python3 "$HERE/build_dict.py" dictprobe.json "$TESTS_JSON" "$HERE/../maps" importers.json
+
+# Fourth pass (no coverage): which class's definition every `X.NAME` read of a class
+# constant resolves to, per test (imports included), and later uses of constants passed
+# unchanged into a constructor (load attrprobe before anything imports sqlglot).
+rm -f attrprobe.json
+PYTHONPATH="$HERE" ATTRPROBE_OUT="$PWD/attrprobe.json" MAPPLUGIN_OUT=/dev/null \
+  python3 -m pytest tests/ -p attrprobe -p mapplugin -p no:cacheprovider -q
+python3 "$HERE/build_attr.py" attrprobe.json "$TESTS_JSON" "$HERE/../maps" importers.json

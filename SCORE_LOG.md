@@ -28,6 +28,7 @@ Simulated = test seconds (busiest worker per commit) + worker seconds (2 s per w
 | PROBE | `4688c9c` (branch probe-no-max-nodes) | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.33 | pending | **Unsafe probe, never the final.** v16 but test_max_nodes (28.8 s) never selected. Drop / ~29 s = hidden commits that pick it; each miss = one where it fails. |
 Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit sample.
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).
+| v17 | `HASH` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | pending | Test helper modules with no test functions (tests/helpers.py, test-package __init__.py) select their importers instead of all tests; validated on 2 such edits against the full suite |
 
 ## Final-entry safety
 
@@ -44,7 +45,7 @@ breaks; maps from the pinned commit only; 0 misses on every local check.
 | # | Candidate | Question it answers | Expected board saving | Risk |
 |---|---|---|---|---|
 | 1 | PROBE `4688c9c` (submitted) | How many hidden commits pick test_max_nodes, and does it ever fail there? | measurement only | unsafe by design; not a final |
-| 2 | v17: tests/helpers.py and tests/**/__init__.py select their importers (import graph) instead of all tests | Do hidden commits edit test helper/package files? | 0 if not; up to ~10 s per such commit | low (import graph, validated on test-file edits) |
+| 2 | v17 `HASH` (ready): tests/helpers.py and tests/**/__init__.py select their importers instead of all tests | Do hidden commits edit test helper/package files? | 0 if not; ~27.6 s per test-package __init__ edit; ~0 for helpers.py (1,377 importers) | low (validated against the full suite) |
 | 3 | v18: CPU trim back to v11 level (v12-v16 added ~0.1 s on the board with no saving there) | none (CPU only) | ~0.1 s | none |
 
 Not doing: a code-derived narrowing of test_max_nodes. It executes 2,432 lines (1,436 in

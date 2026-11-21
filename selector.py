@@ -1112,7 +1112,14 @@ class Selector:
         f = ch.old
         spans = self.test_spans.get(f)
         if spans is None:
-            return None
+            # a test-side module with no test functions (tests/helpers.py, a package
+            # __init__.py): its code runs only in tests whose files import it
+            if os.path.basename(f) == "conftest.py":
+                return None
+            imp = self.module_importers(f)
+            if imp is not None:
+                log(f"  {f}: test helper module -> importers {len(imp)}")
+            return imp
         sel: set[int] = set()
         for line in ch.lines:
             inner = None

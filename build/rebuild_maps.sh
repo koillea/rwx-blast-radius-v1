@@ -30,3 +30,11 @@ rm -f cmpprobe.json
 PYTHONPATH="$HERE" CMPPROBE_OUT="$PWD/cmpprobe.json" MAPPLUGIN_OUT=/dev/null \
   python3 -m pytest tests/ -p cmpprobe -p mapplugin -p no:cacheprovider -q
 python3 "$HERE/build_cmp.py" cmpprobe.json "$TESTS_JSON" "$HERE/../maps" importers.json
+
+# Third pass (no coverage): which tests read which key's VALUE of each class-level
+# constant dict (dicts are wrapped right after their module is imported, so reads
+# during later imports are recorded too, under that import).
+rm -f dictprobe.json
+PYTHONPATH="$HERE" DICTPROBE_OUT="$PWD/dictprobe.json" MAPPLUGIN_OUT=/dev/null \
+  python3 -m pytest tests/ -p mapplugin -p dictprobe -p no:cacheprovider -q
+python3 "$HERE/build_dict.py" dictprobe.json "$TESTS_JSON" "$HERE/../maps" importers.json

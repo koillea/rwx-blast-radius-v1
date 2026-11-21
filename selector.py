@@ -372,6 +372,7 @@ class Selector:
         m = marshal.loads(zlib.decompress(MAPS.read_bytes()))
         S = _Sets(m["sets"])  # each distinct test set, stored once, built on first use
         self._cmp = None
+        self._dicts = None
         self.all = {t["number"] for t in tests}
         self.dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
@@ -514,6 +515,155 @@ class Selector:
             return hit == 1
 
         return blank(old_t) and blank(new_t) and ast.dump(old_t) == ast.dump(new_t)
+
+    # ------------------------------------------------------------ dict entries
+    def _dict_map(self):
+        if self._dicts is None:
+            import marshal
+            import zlib
+
+            p = MAPS.parent / "dicts.bin.z"
+            self._dicts = marshal.loads(zlib.decompress(p.read_bytes())) if p.exists() else {"sets": [], "dicts": []}
+        return self._dicts
+
+    @staticmethod
+    def _key_match(node, keys):
+        """The one real key (as the probe recorded it) that a dict-literal key denotes,
+        or None if it cannot be pinned to exactly one: a constant by its value, a class
+        or enum member written as a name or attribute chain by its final name."""
+        import ast
+
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool, bytes, type(None))):
+            r = repr(node.value)
+            return r if r in keys else None
+        if isinstance(node, (ast.Attribute, ast.Name)):
+            last = node.attr if isinstance(node, ast.Attribute) else node.id
+            hits = [k for k in keys if k.startswith(("cls:", "enum:")) and k.rsplit(".", 1)[-1] == last]
+            return hits[0] if len(hits) == 1 else None
+        return None
+
+    def dict_entries(self, f, stmt, owner, ch):
+        """An edit that changes only VALUES of a class-level constant dict literal (same
+        keys, same order) reaches only tests that read those keys' values, or used the
+        dict as a whole, in this class's dict or a subclass's copy of it (dict-read
+        probe, maps/dicts.bin.z, recorded on the pinned commit). Import-time readers
+        must be class-body copies ({**Base.N, ...}) or key-only checks. None = rule
+        does not apply."""
+        import ast
+
+        if not owner or not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or not isinstance(stmt.value, ast.Dict):
+            return None
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            return None
+        name = targets[0].id
+        pairs = self._stmt_pairs(f, ch)
+        if not pairs:
+            return None
+        new = next((y for x, y, p in pairs if x.lineno == stmt.lineno and list(p) == list(owner)), None)
+        if new is None or not isinstance(new, type(stmt)) or not isinstance(new.value, ast.Dict):
+            return None
+        a, b = stmt.value, new.value
+        if len(a.keys) != len(b.keys):
+            return None
+        changed = []
+        for ka, kb, va, vb in zip(a.keys, b.keys, a.values, b.values):
+            if (ka is None) != (kb is None) or (ka is not None and ast.dump(ka) != ast.dump(kb)):
+                return None
+            if ast.dump(va) != ast.dump(vb):
+                if ka is None:
+                    return None  # a changed ** spread
+                changed.append(ka)
+        if not changed:
+            return None
+        dm = self._dict_map()
+        # import-time readers in the modules loaded before the probe recorded anything:
+        # only copies into subclass dicts or key checks (later imports were recorded)
+        if not self._dict_import_reads_ok(name, set(dm.get("eager", ()))):
+            return None
+        cls_key = f"{f}::{'.'.join(owner)}"
+        family = [d for d in dm["dicts"] if d["name"] == name and cls_key in d["mro"]]
+        if not family:
+            return None
+        own = [d for d in family if cls_key in d["owners"]]
+        if not own:
+            return None
+        keyset = set(own[0]["keys"])
+        reprs = []
+        for ka in changed:
+            r = self._key_match(ka, keyset)
+            if r is None:
+                return None  # not pinned to exactly one real key of this dict
+            reprs.append(r)
+        sets = dm["sets"]
+        out: set[int] = set()
+        for d in family:
+            if d["whole"] == -1:
+                return None
+            out.update(sets[d["whole"]])
+            for r in reprs:
+                idx = d["get"].get(r)
+                if idx == -1:
+                    return None
+                if idx is not None:
+                    out.update(sets[idx])
+        log(f"  {f}:{stmt.lineno} dict {name}: {len(changed)} entries changed -> readers {len(out)}")
+        return out
+
+    def _dict_import_reads_ok(self, name, eager):
+        word = re.compile(r"\b" + re.escape(name) + r"\b")
+
+        def modname(g):
+            m = g[:-3].replace("/", ".")
+            return m[: -len(".__init__")] if m.endswith(".__init__") else m
+        for g, glines, text in self._sources():
+            if name not in text or not g.startswith("sqlglot/"):
+                continue
+            il = self.imp_line_mods.get(g, {})
+            for i, line in enumerate(glines, 1):
+                if name not in line or not word.search(line):
+                    continue
+                t = line.strip()
+                if t.startswith("#") or self._in_docstring(g, i):
+                    continue
+                u = self._unit_for(g, i)
+                body = u is None or i < u[2]
+                if body:
+                    unrecorded = modname(g) in eager  # module/class body ran before recording
+                else:
+                    ys = [self.imp_mods[y] for y in il.get(i, ())]
+                    unrecorded = any(y in eager for y in ys)  # called during an early import
+                if not unrecorded:
+                    continue
+                if re.match(r"^\s*" + re.escape(name) + r"\s*(:[^=]*)?=", line):
+                    continue  # a definition (its own literal, or a subclass copy below)
+                if re.match(r"^\s*" + re.escape(name) + r"\s*:[^=]*$", line):
+                    continue  # a bare type declaration: nothing is read
+                if re.search(r"\bfor\s+\w+\s+in\s+(?:[\w.]+\.)?" + re.escape(name) + r"\b(?!\s*\.\s*(?:items|values)\b)", line):
+                    continue  # iterates the keys only (e.g. building a trie of them)
+                if re.search(r"\*\*\s*[\w.]+\." + re.escape(name) + r"\b", line):
+                    continue  # {**Base.N, ...}: the values flow into a subclass dict (recorded)
+                if re.search(r"\bin\s+[\w.]+\." + re.escape(name) + r"\b", line):
+                    continue  # key membership only
+                m = re.match(r"^\s*(\w+)\s*=\s*[\w.]+\." + re.escape(name) + r"\s*$", line)
+                if m and u is not None and self._local_keys_only(g, glines, m.group(1), i, u):
+                    continue
+                log(f"    {name} read at import time {g}:{i}")
+                return False
+        return True
+
+    @staticmethod
+    def _local_keys_only(g, glines, var, line, unit):
+        """A local bound from the dict is used only for key membership / truthiness."""
+        v = re.compile(r"\b" + re.escape(var) + r"\b")
+        for j in range(line + 1, unit[1] + 1):
+            t = glines[j - 1]
+            if not v.search(t):
+                continue
+            ok = re.sub(r"\bin\s+" + re.escape(var) + r"\b|\bif\s+" + re.escape(var) + r"\b|\bnot\s+" + re.escape(var) + r"\b", "", t)
+            if v.search(ok):
+                return False
+        return True
 
     def expression_arg_types(self, f, stmt, owner):
         """An edit to `arg_types` of an expression class C is visible only through:
@@ -695,6 +845,10 @@ class Selector:
             fl = self.file_level(f)
             # both are sound over-approximations, so their intersection is too
             return expr_rule & fl if fl is not None else expr_rule
+        dict_rule = self.dict_entries(f, stmt, owner, ch)
+        if dict_rule is not None:
+            fl = self.file_level(f)
+            return dict_rule & fl if fl is not None else dict_rule
         if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
             return None
         if any(isinstance(x, (ast.Call, ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Await))

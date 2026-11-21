@@ -236,11 +236,11 @@ def docstring_lines(path):
     except (SyntaxError, FileNotFoundError, UnicodeDecodeError):
         return []
     out = []
+    # every bare string-literal statement: docstrings (first in a body) and the
+    # "attribute docstrings" that follow assignments, which the compiler discards
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
-            b0 = node.body[0]
-            if isinstance(b0, ast.Expr) and isinstance(getattr(b0, "value", None), ast.Constant) and isinstance(b0.value.value, str):
-                out.append([b0.lineno, b0.end_lineno])
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            out.append([node.lineno, node.end_lineno])
     return out
 
 

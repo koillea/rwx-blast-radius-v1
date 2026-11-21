@@ -205,9 +205,10 @@ def _cmp_partner():
 
 
 def same_code(ch: FileChange) -> bool:
-    """True if the patched file parses to the same AST as the pinned one once
-    docstrings are blanked: only comments, layout or docstring text changed. No test
-    in the suite reads a docstring (the doctest module is not collected by pytest)."""
+    """True if the patched file parses to the same AST as the pinned one once every
+    bare string statement is blanked: only comments, layout, docstring text or other
+    discarded string statements changed. No test in the suite reads a docstring (the
+    doctest module is not collected by pytest)."""
     import ast
 
     src = pinned_source(ch.old)
@@ -219,10 +220,9 @@ def same_code(ch: FileChange) -> bool:
         return False
     for tree in trees:
         for n in ast.walk(tree):
-            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body:
-                d = n.body[0]
-                if isinstance(d, ast.Expr) and isinstance(d.value, ast.Constant) and isinstance(d.value.value, str):
-                    d.value = ast.Constant("")
+            # docstrings, and bare string statements elsewhere (discarded when compiled)
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+                n.value = ast.Constant("")
     return ast.dump(trees[0]) == ast.dump(trees[1])
 
 
@@ -286,6 +286,13 @@ def split(nums, dur):
 
 # ------------------------------------------------------------------ selection
 DOC_EXT = (".md", ".rst", ".txt", ".png", ".svg", ".html")
+
+
+# Expression-class attributes that sqlglot reads only through an instance (self/node/
+# expression.attr) or in from_arg_list, which then instantiates the class; checked by
+# reading every use: arg_types (and required_args derived from it), is_var_len_args,
+# is_primitive, _hash_raw_args.
+INSTANCE_READ_ATTRS = ("arg_types", "is_var_len_args", "is_primitive", "_hash_raw_args")
 
 
 class _Sets:
@@ -471,9 +478,10 @@ class Selector:
         if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             return None
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
-        if [getattr(t, "id", None) for t in targets] != ["arg_types"]:
+        names = [getattr(t, "id", None) for t in targets]
+        if len(names) != 1 or names[0] not in INSTANCE_READ_ATTRS:
             return None
-        return self._arg_types_observers(f, owner[0], set())
+        return self._arg_types_observers(f, owner[0], set(), names[0])
 
     def _arg_types_copier(self, g, line):
         """(file, class) if `line` is inside `arg_types = ...` of a top-level class in g."""
@@ -492,13 +500,14 @@ class Selector:
                         return n.name
         return None
 
-    def _arg_types_observers(self, f, cname, seen):
+    def _arg_types_observers(self, f, cname, seen, aname="arg_types"):
         if (f, cname) in seen:
             return set()
         seen.add((f, cname))
         sel = set(self.class_use.get(f"{f}::{cname}", ()))
         word = re.compile(r"\b" + re.escape(cname) + r"\b")
-        attr = re.compile(r"\b" + re.escape(cname) + r"\s*\.\s*(?:arg_types|required_args)\b")
+        alt = "arg_types|required_args" if aname == "arg_types" else re.escape(aname)
+        attr = re.compile(r"\b" + re.escape(cname) + r"\s*\.\s*(?:" + alt + r")\b")
         for g, glines in self._sources_with(cname):
             for i, text in enumerate(glines, 1):
                 if cname not in text or not word.search(text):
@@ -515,9 +524,9 @@ class Selector:
                     continue  # names C without reading its arg_types
                 u = self._unit_for(g, i)
                 if u is None or i < u[2]:
-                    copier = self._arg_types_copier(g, i)
+                    copier = self._arg_types_copier(g, i) if aname == "arg_types" else None
                     if copier is not None:
-                        r = self._arg_types_observers(g, copier, seen)
+                        r = self._arg_types_observers(g, copier, seen, aname)
                         if r is None:
                             return None
                         sel |= r

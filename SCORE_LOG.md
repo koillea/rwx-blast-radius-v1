@@ -25,13 +25,15 @@ Simulated = test seconds (busiest worker per commit) + worker seconds (2 s per w
 | v15 | `0af21bc` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.37 | - | Non-source files no test reads select nothing; sqlglotc/ -> test_sqlglotc; test-file helpers -> importers of that file, not all tests |
 
 | v16 | `bd6fe7d` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.43 | **200.9** (unchanged: hidden commits have no added/deleted files we mishandled) | Added/deleted files handled exactly (deleted module -> its importers and users; added module -> nothing; deleted test file -> its tests and importers; deleted fixture -> readers) instead of all tests; validated on 6 cases against the full suite |
+| PROBE B | `a45f767` (branch probe-noslow, built on v18) | 672.7 | 672.651 | - | - | 2 | - | submitting | **Unsafe, never the final.** v18 minus tests > 5 s. Read: 200.14 - (simulated - 300 x misses) = cost of slow tests on the hidden set |
+| PROBE A | `01cabc2` (branch probe-empty) | 5400 | 5400 | 0 | 0 | 18 | - | submitting | **Unsafe, never the final.** Empty selections. Misses = hidden commits that break any test |
 | PROBE | `4688c9c` (branch probe-no-max-nodes) | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.33 | pending | **Unsafe probe, never the final.** v16 but test_max_nodes (28.8 s) never selected. Drop / ~29 s = hidden commits that pick it; each miss = one where it fails. |
 Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit sample.
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).
 | v17 | `981844f` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | pending | Test helper modules with no test functions (tests/helpers.py, test-package __init__.py) select their importers instead of all tests; validated on 2 such edits against the full suite |
 | v18 | `9b9fcfc` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | Dict-entry value edits select only tests that read the changed keys' values (dict-read probe on the pinned commit). Validated on 25 + 25 fresh dict edits (0 misses; first run found and fixed an enum-key matching bug), then **125 fresh dict edits (46 with real failures): 0 misses**, 1,185.5 s vs v17's 1,455.4 s. Final candidate. |
 | v19 | `f206657` | 106.1 | 105.6 | - | - | 0 | 0.46 | **200.9** (submitted as b650383 = f206657 + log; same simulated as v11-v18) - **current final entry** | v18 + comparison-probe fix: a swap whose partner operator re-enters the same comparison (e.g. inside `__eq__`) counts as differing. Found by a 125-swap validation (1 real miss, V11224); same scores, closes a gap present since v7. Validation of the fix: in progress | 
-| v20 | `9b60ad1` (branch v20-flag-rule) | 105.4 | 105.4 | - | - | 0 | 0.40 | pending | Class-constant edits select only tests that read that class's definition (flag probe). Benchmark 191.9 -> 147.8 s. 125-edit flag validation in progress; not the final until clean |
+| v20 | `9b60ad1` (branch v20-flag-rule) | 105.4 | 105.4 | - | - | 0 | 0.40 | **198.2** (first move since v11: about 1 small class-constant edit in the hidden set; benchmark predicted -44 s) | Class-constant edits select only tests that read that class's definition (flag probe). Benchmark 191.9 -> 147.8 s. 125-edit flag validation in progress; not the final until clean |
 
 ## Final-entry safety
 

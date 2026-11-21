@@ -194,6 +194,16 @@ def patched_source(src: str, ch: FileChange) -> str:
     return "\n".join(out)
 
 
+def _cmp_partner():
+    import ast
+
+    return {ast.Is: (ast.Eq, "is"), ast.Eq: (ast.Is, "=="), ast.IsNot: (ast.NotEq, "is not"),
+            ast.NotEq: (ast.IsNot, "!="), ast.Lt: (ast.LtE, "<"), ast.LtE: (ast.Lt, "<="),
+            ast.Gt: (ast.GtE, ">"), ast.GtE: (ast.Gt, ">=")}
+
+
+
+
 def same_code(ch: FileChange) -> bool:
     """True if the patched file parses to the same AST as the pinned one once
     docstrings are blanked: only comments, layout or docstring text changed. No test
@@ -281,6 +291,7 @@ DOC_EXT = (".md", ".rst", ".txt", ".png", ".svg", ".html")
 class Selector:
     def __init__(self, tests):
         m = json.loads(MAPS.read_text())
+        self._cmp = None
         self.all = {t["number"] for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
         self.by_file: dict[str, set[int]] = {}
@@ -708,6 +719,57 @@ class Selector:
             return set(self.fixture_dirs[d])
         return None
 
+    def comparison_swap(self, ch: FileChange):
+        """An edit whose only effect is to swap one comparison for its partner (is <-> ==,
+        is not <-> !=, < <-> <=, > <-> >=) changes behaviour only where the two give
+        different results. The map build recorded, for each comparison in sqlglot, the
+        tests that ever evaluated it on such operands (maps/cmp.json). None = not this
+        kind of edit, or the comparison also ran at import time."""
+        import ast
+
+        if self._cmp is None:
+            p = MAPS.parent / "cmp.json"
+            self._cmp = json.loads(p.read_text()) if p.exists() else {"files": [], "diff": {}}
+            self._cmp["files"] = set(self._cmp["files"])
+        f = ch.old
+        if f not in self._cmp["files"]:
+            return None
+        src = pinned_source(f)
+        if src is None:
+            return None
+        try:
+            old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
+        except SyntaxError:
+            return None
+        a_nodes, b_nodes = list(ast.walk(old_t)), list(ast.walk(new_t))
+        if len(a_nodes) != len(b_nodes):
+            return None
+        swaps = []
+        for a, b in zip(a_nodes, b_nodes):
+            if type(a) is not type(b):
+                if not isinstance(a, ast.cmpop) or not isinstance(b, ast.cmpop):
+                    return None
+            elif isinstance(a, ast.Compare) and [type(o) for o in a.ops] != [type(o) for o in b.ops]:
+                swaps.append((a, b))
+        if len(swaps) != 1:
+            return None
+        a, b = swaps[0]
+        partner = _cmp_partner()
+        if len(a.ops) != 1 or len(b.ops) != 1 or partner.get(type(a.ops[0]), (None,))[0] is not type(b.ops[0]):
+            return None
+        b.ops = a.ops
+        if ast.dump(old_t) != ast.dump(new_t):
+            return None  # something else changed too
+        key = f"{f}:{a.lineno}:{a.col_offset}:{partner[type(a.ops[0])][1]}"
+        if key not in self._cmp["diff"]:
+            log(f"  {f}:{a.lineno} comparison swap never differs -> nothing")
+            return set()
+        tests = self._cmp["diff"][key]
+        if tests is None:
+            return None
+        log(f"  {f}:{a.lineno} comparison swap differs in {len(tests)} tests")
+        return set(tests)
+
     def select(self, changes: list[FileChange]) -> set[int]:
         sel: set[int] = set()
         for ch in changes:
@@ -723,6 +785,8 @@ class Selector:
                 r = self.fixture(ch) if not ch.deleted else None
             elif ch.added or ch.deleted:
                 r = None
+            elif path.startswith("sqlglot/") and path.endswith(".py") and (sw := self.comparison_swap(ch)) is not None:
+                r = sw
             elif path.startswith("sqlglot/") and path.endswith(".py") and same_code(ch):
                 log(f"  {path}: same AST apart from docstrings -> nothing")
                 continue

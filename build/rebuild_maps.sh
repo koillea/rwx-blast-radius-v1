@@ -23,3 +23,10 @@ rm -f .coverage usage.json
 PYTHONPATH="$HERE" MAPPLUGIN_OUT="$PWD/usage.json" \
   coverage run --rcfile="$HERE/coveragerc" -m pytest tests/ -p mapplugin -p no:cacheprovider -q
 python3 "$HERE/build_maps.py" . "$TESTS_JSON" "$HERE/../maps"
+
+# Second pass (no coverage): which tests ever evaluate each comparison on operands
+# where its partner operator (is/==, is not/!=, </<=, >/>=) would disagree.
+rm -f cmpprobe.json
+PYTHONPATH="$HERE" CMPPROBE_OUT="$PWD/cmpprobe.json" MAPPLUGIN_OUT=/dev/null \
+  python3 -m pytest tests/ -p cmpprobe -p mapplugin -p no:cacheprovider -q
+python3 "$HERE/build_cmp.py" cmpprobe.json "$TESTS_JSON" "$HERE/../maps"

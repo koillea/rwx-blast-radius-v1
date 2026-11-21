@@ -13,9 +13,12 @@
 5. Class- and module-level edits are narrowed where that's provably safe:
    - **An edit inside a `lambda` body** (for example an entry of a parser's `FUNCTIONS` table) runs the tests that called it.
    - **An UPPERCASE constant with a call-free value** (such as `WEEK_OFFSET`) runs the tests that executed a function reading that name. If any read happens at import time (class bodies, metaclasses), the whole file's tests run instead.
-6. Every narrowing of a class-level edit is intersected with the file-level set. Both are sound over-approximations, so a narrowing rule can only shrink a selection. "Import time" means only code run while sqlglot itself is imported; code a test module runs while it is imported counts for that module's tests only.
-7. Fixture edits run the tests that opened that fixture. Test-method edits run that test. Anything the maps cannot vouch for (new or deleted files, test helpers, unknown files) runs every test, because a run-all (~37 s) is far cheaper than a miss (300 s).
-8. Split the chosen tests longest-first over the worker count (1–8) that minimises busiest-worker time + 2 s per worker.
+   - **An edit confined to one `lambda` body** (checked by comparing the old and new syntax trees) runs only the tests that executed a line of that body.
+6. **Docstring, comment and layout edits:** if the patched file has the same syntax tree as the pinned one once docstrings are blanked, nothing runs. No collected test reads a docstring. The exception is `tests/test_typing.py`, which compares annotator code objects, so it always runs for edits under `sqlglot/typing/`.
+7. **Comparison swaps:** an edit whose only effect is to swap one comparison for its partner (`is`↔`==`, `is not`↔`!=`, `<`↔`<=`, `>`↔`>=`) can change behaviour only where the two operators disagree on the operands actually seen. A second build pass (`build/cmpprobe.py`) evaluates both operators at every such comparison in sqlglot and records the tests in which they ever disagreed (`maps/cmp.json`). Only those tests run. If they disagreed while sqlglot was being imported, the normal rules apply.
+8. Every narrowing of a class-level edit is intersected with the file-level set. Both are sound over-approximations, so a narrowing rule can only shrink a selection. "Import time" means only code run while sqlglot itself is imported; code a test module runs while it is imported counts for that module's tests only.
+9. Fixture edits run the tests that opened that fixture. Test-method edits run that test. Anything the maps cannot vouch for (new or deleted files, test helpers, unknown files) runs every test, because a run-all (~37 s) is far cheaper than a miss (300 s).
+10. Split the chosen tests longest-first over the worker count (1–8) that minimises busiest-worker time + 2 s per worker.
 
 **The maps** (`build/`) are built once from sqlglot at the pinned commit `eb11aec`, and committed. They hold:
 - per-test coverage, recorded with each test's own coverage context;
@@ -24,7 +27,11 @@
 
 The suite's process pools run in-process during the build, with every task pickled and unpickled as a real process boundary would, so work done "in a worker" is credited to its test and `serde` (sqlglot's pickling) counts as used. Nothing is derived from any patch. Rebuild with `bash build/rebuild_maps.sh <tests.json>`.
 
-**Local results on the 30 sample commits:**
+**Local results on the 30 sample commits** (the kit's `score.py`; the board uses different, hidden commits and adds CPU time, about 0.4 s for this selector):
 
-| Selector | Simulated seconds | Misses |
-|
+| Version | Simulated seconds | Misses |
+|---|---|---|
+| v3 | 185.452 | 0 |
+| v4 | 179.454 | 0 |
+| v6 | 179.476 | 0 |
+| v7 (comparison swaps) | 126.699 | 0 |

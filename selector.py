@@ -321,6 +321,30 @@ class Selector:
                 inner = (s0, e, b)
         return inner
 
+    def _lambda_confined(self, f, ch, lam) -> bool:
+        """True if old and patched file differ only inside the body of `lam`."""
+        import ast
+
+        if any(not (lam.body.lineno <= l <= lam.body.end_lineno) for l in ch.lines):
+            return False
+        if any(first <= lam.lineno for first, _r, _a in ch.blocks):
+            return False  # the lambda itself must sit before every change
+        src = pinned_source(f)
+        try:
+            old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
+        except SyntaxError:
+            return False
+
+        def blank(tree):
+            hit = 0
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Lambda) and (n.lineno, n.col_offset) == (lam.lineno, lam.col_offset):
+                    n.body = ast.Constant(None)
+                    hit += 1
+            return hit == 1
+
+        return blank(old_t) and blank(new_t) and ast.dump(old_t) == ast.dump(new_t)
+
     def expression_arg_types(self, f, stmt, owner):
         """An edit to `arg_types` of an expression class C is visible only through C:
         its instances (and subclasses'), or code that names C. Select tests that created
@@ -394,6 +418,20 @@ class Selector:
                         lam = b
         if lam is not None and all(lam.lineno < l < lam.end_lineno for l in changed if abs(l - line) <= 1):
             return set(self.cls_lines.get(f, {}).get(line, ()))
+        # an edit whose every change lies inside one lambda body (checked on the ASTs)
+        # is seen only by calls of that lambda; each call runs a line of the body
+        body = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Lambda) and node.body.lineno <= line <= node.body.end_lineno:
+                if body is None or (node.body.end_lineno - node.body.lineno) < (body.body.end_lineno - body.body.lineno):
+                    body = node
+        if body is not None and self._lambda_confined(f, ch, body):
+            cl = self.cls_lines.get(f, {})
+            sel = set()
+            for l in range(body.body.lineno, body.body.end_lineno + 1):
+                sel |= set(cl.get(l, ()))
+            log(f"  {f}:{line} confined to lambda body -> {len(sel)}")
+            return sel
         # ---- simple constant assignment
         stmt = None
 

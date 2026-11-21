@@ -194,6 +194,28 @@ def patched_source(src: str, ch: FileChange) -> str:
     return "\n".join(out)
 
 
+def same_code(ch: FileChange) -> bool:
+    """True if the patched file parses to the same AST as the pinned one once
+    docstrings are blanked: only comments, layout or docstring text changed. No test
+    in the suite reads a docstring (the doctest module is not collected by pytest)."""
+    import ast
+
+    src = pinned_source(ch.old)
+    if src is None:
+        return False
+    try:
+        trees = [ast.parse(src), ast.parse(patched_source(src, ch))]
+    except SyntaxError:
+        return False
+    for tree in trees:
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body:
+                d = n.body[0]
+                if isinstance(d, ast.Expr) and isinstance(d.value, ast.Constant) and isinstance(d.value.value, str):
+                    d.value = ast.Constant("")
+    return ast.dump(trees[0]) == ast.dump(trees[1])
+
+
 def significant_lines(ch: FileChange) -> set[int] | None:
     """Old line numbers of the blocks that can change behaviour; None if the
     patched file no longer parses (an import error fails every importer)."""
@@ -691,12 +713,19 @@ class Selector:
         for ch in changes:
             path = ch.new if ch.added else ch.old
             log(f" {path} lines={sorted(ch.lines)[:12]} added={ch.added} deleted={ch.deleted}")
+            if path.startswith("sqlglot/typing/"):
+                # tests/test_typing.py compares annotator code objects, whose constants
+                # carry docstrings and nested line numbers: it sees even layout edits
+                sel |= {n for i, n in self.ids.items() if i.startswith("tests/test_typing.py::")}
             if path.endswith(DOC_EXT) or path.startswith(("docs/", "posts/", "pdoc/", ".github/")):
                 continue
             if path.startswith("tests/fixtures/"):
                 r = self.fixture(ch) if not ch.deleted else None
             elif ch.added or ch.deleted:
                 r = None
+            elif path.startswith("sqlglot/") and path.endswith(".py") and same_code(ch):
+                log(f"  {path}: same AST apart from docstrings -> nothing")
+                continue
             elif path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):
                 sig = significant_lines(ch)
                 if sig is None:

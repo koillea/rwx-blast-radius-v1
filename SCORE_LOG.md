@@ -29,7 +29,7 @@ Simulated = test seconds (busiest worker per commit) + worker seconds (2 s per w
 Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit sample.
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).
 | v17 | `981844f` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | pending | Test helper modules with no test functions (tests/helpers.py, test-package __init__.py) select their importers instead of all tests; validated on 2 such edits against the full suite |
-| v18 | `9b9fcfc` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | Dict-entry value edits select only tests that read the changed keys' values (dict-read probe on the pinned commit). Validated on 25 + 25 fresh dict edits (0 misses; first run found and fixed an enum-key matching bug) |
+| v18 | `9b9fcfc` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | Dict-entry value edits select only tests that read the changed keys' values (dict-read probe on the pinned commit). Validated on 25 + 25 fresh dict edits (0 misses; first run found and fixed an enum-key matching bug), then **125 fresh dict edits (46 with real failures): 0 misses**, 1,185.5 s vs v17's 1,455.4 s. Final candidate. |
 
 ## Final-entry safety
 
@@ -43,7 +43,7 @@ as the final on the submission page.
 | # | Candidate | Question it answers | Expected board saving | Risk |
 |---|---|---|---|---|
 | 1 | v17 `981844f` (submitting) | Do hidden commits edit test helper/package files? | ~0 (likely) | low |
-| 2 | **v18 `9b9fcfc`** | Do hidden commits contain dict-entry value edits (like kit 4d63, gbav)? | **~12 s** (0.855 x 14 s on the kit; estimate) | low: validated on 50 dict edits, 0 misses |
+| 2 | **v18 `9b9fcfc`** | Do hidden commits contain dict-entry value edits (like kit 4d63, gbav)? | **~12 s** (0.855 x 14 s on the kit; estimate) | low: 175 dict edits validated, 0 misses since the enum fix |
 | 3 | flag constants followed from the copying constructor to their use sites (value-level, like v18) | Do hidden commits edit scalar flags read in constructors? | ~5-10 s (estimate) | to be validated |
 
 Not doing: a code-derived narrowing of test_max_nodes. It executes 2,432 lines (1,436 in

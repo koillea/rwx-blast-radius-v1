@@ -362,6 +362,7 @@ class Selector:
         S = _Sets(m["sets"])  # each distinct test set, stored once, built on first use
         self._cmp = None
         self.all = {t["number"] for t in tests}
+        self.dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
         self.by_file: dict[str, set[int]] = {}
         self.by_class: dict[str, set[int]] = {}
@@ -428,6 +429,47 @@ class Selector:
 
     def _in_docstring(self, f, line):
         return any(a <= line <= b for a, b in self.docstrings.get(f, ()))
+
+    def _reading_statement_tests(self, g, line):
+        """Tests that executed the statement holding g:line (for a compound statement,
+        its header). A read written on that line happens only when the statement runs.
+        None when that cannot be told (then the caller uses the whole function)."""
+        import ast
+
+        tree = self._tree(g)
+        if tree is None:
+            return None
+        node, best = tree, None
+        while True:
+            nxt = None
+            for c in ast.iter_child_nodes(node):
+                if isinstance(c, ast.stmt) and c.lineno <= line <= c.end_lineno:
+                    nxt = c
+                    break
+                if not isinstance(c, ast.stmt) and getattr(c, "lineno", None) is not None \
+                        and c.lineno <= line <= (c.end_lineno or c.lineno) and isinstance(c, (ast.excepthandler, ast.match_case)):
+                    nxt = c
+                    break
+            if nxt is None:
+                break
+            if isinstance(nxt, ast.stmt):
+                best = nxt
+            node = nxt
+        if best is None or isinstance(best, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return None
+        lo, hi = best.lineno, best.end_lineno
+        body = getattr(best, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.stmt):
+            hi = body[0].lineno - 1  # header of a compound statement
+            if line > hi:
+                return None  # e.g. in an else/finally clause line: use the function
+        lm = self._line_map().get(g)
+        if lm is None:
+            return None
+        out = set()
+        for l in range(lo, hi + 1):
+            out.update(lm.get(l, ()))
+        return out
 
     def _unit_for(self, f, line):
         inner = None
@@ -666,7 +708,13 @@ class Selector:
                     ts, imp = self.units.get((g, u[0], u[1]), (set(), False))
                     if imp:
                         return None
-                    sel |= ts
+                    # narrowing to the reading statement costs a parse: only worth it
+                    # when it could drop a slow test
+                    if any(self.dur.get(n, 0) >= 1000 for n in ts if n not in sel):
+                        st = self._reading_statement_tests(g, i)
+                        sel |= ts if st is None else st
+                    else:
+                        sel |= ts
         log(f"  {f}:{line} constant {names} -> readers {len(sel)}")
         return sel
 

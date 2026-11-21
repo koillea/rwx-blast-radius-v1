@@ -12,7 +12,7 @@
 4. Comment-only or blank-line edits are ignored, because Python never sees them. The check is made against the pinned source shipped in `maps/pinned_src.zip`, and an edit doesn't count as comment-only if it sits inside a multi-line string or after a `\` continuation. Every patched `.py` file is parsed; if it no longer parses, every test runs, since an import error fails every importer.
 5. Class- and module-level edits are narrowed where that's provably safe:
    - **An edit inside a `lambda` body** (for example an entry of a parser's `FUNCTIONS` table) runs the tests that called it.
-   - **An UPPERCASE constant with a call-free value** (such as `WEEK_OFFSET`) runs the tests that executed a function reading that name. If any read happens at import time (class bodies, metaclasses), the whole file's tests run instead.
+   - **An UPPERCASE constant with a call-free value** (such as `WEEK_OFFSET`) runs the tests that executed a function reading that name; where that would add a slow test, only the tests that executed the reading statement itself. If any read happens at import time (class bodies, metaclasses), the whole file's tests run instead.
    - **An edit confined to one `lambda` body** (checked by comparing the old and new syntax trees) runs only the tests that executed a line of that body.
    - **An edit to an expression class's `arg_types`, `is_var_len_args`, `is_primitive` or `_hash_raw_args`** (attributes sqlglot reads only through an instance, or in `from_arg_list` just before instantiating) runs the tests that created that class or a subclass (every read in sqlglot goes through an instance), the code that spells out `C.arg_types`/`C.required_args`, and tests that name the class. A copy made while another expression class is defined (`TryCast` copying `Cast`'s) adds that class's observers.
 6. **Docstring, comment and layout edits:** if the patched file has the same syntax tree as the pinned one once every bare string statement is blanked (docstrings, and the attribute docstrings after assignments, which the compiler discards), nothing runs. No collected test reads a docstring. The exception is `tests/test_typing.py`, which compares annotator code objects, so it always runs for edits under `sqlglot/typing/`.
@@ -46,3 +46,4 @@ The suite's process pools run in-process during the build, with every task pickl
 | v10 (import exposure: closes a miss v3–v9 shared) | 119.652 | 0 |
 | v11 (same picks as v10, ~43% less CPU) | 119.652 | 0 |
 | v12 (attribute docstrings; more instance-read attributes) | 119.652 | 0 |
+| v13 (constant readers narrowed to the reading statement) | 119.652 | 0 |

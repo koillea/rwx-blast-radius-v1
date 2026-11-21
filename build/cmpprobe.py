@@ -30,24 +30,34 @@ _mp = [None]
 
 
 _IN_ALT = [False]
+_ALT_SID = [-1]
+_REENTERED = [False]
 
 
 def __cmp_probe__(sid, a, b):
     site = SITES[sid]
     if _IN_ALT[0]:  # evaluating a partner operator: not part of the real run
+        if sid == _ALT_SID[0]:
+            # The partner operator's own code runs this same comparison again: with the
+            # swap applied, that inner evaluation would use the partner too (and may
+            # recurse), which this probe cannot see. Count the evaluation as differing.
+            _REENTERED[0] = True
         return site[4](a, b)
     r = site[4](a, b)
     if site[6] and a is not b and type(a) is type(b) and getattr(type(a), "arg_types", None) is not None:
         same = False  # == on two sqlglot nodes hashes whole trees: assume it may differ
     else:
         _IN_ALT[0] = True
+        _ALT_SID[0] = sid
+        _REENTERED[0] = False
         try:
             alt = site[5](a, b)
-            same = alt is r or (type(alt) is bool and type(r) is bool and alt == r)
+            same = (alt is r or (type(alt) is bool and type(r) is bool and alt == r)) and not _REENTERED[0]
         except BaseException:  # noqa: BLE001
             same = False
         finally:
             _IN_ALT[0] = False
+            _ALT_SID[0] = -1
     if not same:
         m = _mp[0]
         DIFF.setdefault(sid, set()).add(m.CUR[0] if m is not None else "")

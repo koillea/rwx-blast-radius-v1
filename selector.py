@@ -1561,7 +1561,7 @@ def main():
     out = []
     for p in sorted((DATA / "commits").glob("*.patch")):
         log(p.stem)
-        chosen = sel.select(parse_patch(p.read_text(encoding="utf-8", errors="replace")))
+        chosen = set()  # PROBE ONLY (branch probe-empty): select nothing. Misses = hidden commits with a failing test. Never the final.
         out.append(json.dumps({"commit": p.stem, "workers": split(sorted(chosen), dur)}))
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
 

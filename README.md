@@ -23,7 +23,7 @@
 
    Edits confined to a lambda body skip the name check: only calls of that lambda see them, and calls during imports are counted. A function header (decorators, defaults) is checked the same way, because it runs when the `def` runs.
 9. Every narrowing of a class-level edit is intersected with the file-level set. Both are sound over-approximations, so a narrowing rule can only shrink a selection. "Import time" means only code run while sqlglot itself is imported; code a test module runs while it is imported counts for that module's tests only.
-10. Fixture edits run the tests that opened that fixture. Test-method edits run that test. Anything the maps cannot vouch for (new or deleted files, test helpers, unknown files) runs every test, because a run-all (~37 s) is far cheaper than a miss (300 s).
+10. Fixture edits run the tests that opened that fixture. Test-method edits run that test (and the same method in subclasses, in files importing it); helper or module-level edits in a test file run the tests of every file that imports it. Repository files no test reads (Makefile, .gitignore, LICENSE, MANIFEST.in, benchmarks/, ...) select nothing; sqlglotc/ selects tests/test_sqlglotc.py. Anything the maps cannot vouch for (new or deleted files, test helpers, unknown files) runs every test, because a run-all (~37 s) is far cheaper than a miss (300 s).
 11. Split the chosen tests longest-first over the worker count (1–8) that minimises busiest-worker time + 2 s per worker.
 
 **The maps** (`build/`, stored as zlib-compressed `marshal` with each distinct test set kept once and built only when used) are built once from sqlglot at the pinned commit `eb11aec`, and committed. They hold:
@@ -48,3 +48,4 @@ The suite's process pools run in-process during the build, with every task pickl
 | v12 (attribute docstrings; more instance-read attributes) | 119.652 | 0 |
 | v13 (constant readers narrowed to the reading statement) | 119.652 | 0 |
 | v14 (one-line lambdas, e.g. generator TRANSFORMS) | 119.652 | 0 |
+| v15 (non-source files, test-file helpers) | 119.652 | 0 |

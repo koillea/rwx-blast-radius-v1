@@ -286,6 +286,12 @@ def split(nums, dur):
 
 # ------------------------------------------------------------------ selection
 DOC_EXT = (".md", ".rst", ".txt", ".png", ".svg", ".html")
+# Repository files no test reads during a run (checked against the suite: entry points
+# are mocked, and nothing opens these): editing them cannot change a test's result.
+# setup.py, setup.cfg and pyproject.toml are NOT here (packaging / pytest start-up).
+NO_EFFECT_FILES = {".gitignore", ".gitmodules", ".gitpod.yml", ".pre-commit-config.yaml", "LICENSE",
+                   "MANIFEST.in", "Makefile", "sqlglot/py.typed", "sqlglot-integration-tests"}
+NO_EFFECT_DIRS = ("benchmarks/",)
 
 
 # Expression-class attributes that sqlglot reads only through an instance (self/node/
@@ -364,6 +370,7 @@ class Selector:
         self.all = {t["number"] for t in tests}
         self.dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
+        self.id_of = {t["number"]: t["id"] for t in tests}
         self.by_file: dict[str, set[int]] = {}
         self.by_class: dict[str, set[int]] = {}
         for t in tests:
@@ -1110,9 +1117,33 @@ class Selector:
             tid = f + "::" + inner[2].replace(".", "::") if inner else None
             if tid in self.ids:
                 sel.add(self.ids[tid])
+                # a test method also runs in subclasses, which live in files importing this one
+                meth = "::" + inner[2].rsplit(".", 1)[-1]
+                imp = self.module_importers(f)
+                if imp is None:
+                    return None
+                sel |= {n for n in imp if self.id_of[n].endswith(meth)}
             else:
-                return None  # helper or module level in a test file: may be shared
+                # helper or module-level code: it runs only in tests whose files import
+                # this module (directly or through other modules)
+                imp = self.module_importers(f)
+                if imp is None:
+                    return None
+                log(f"  {f}:{line} helper/module level in a test file -> importers {len(imp)}")
+                sel |= imp
         return sel
+
+    def module_importers(self, f):
+        """Tests whose files import test module f (from the import graph); an empty set
+        if no test imported it; None if unknown."""
+        mod = f[:-3].replace("/", ".")
+        mod = mod[: -len(".__init__")] if mod.endswith(".__init__") else mod
+        if not self.imp_mods:
+            return None
+        try:
+            return set(self.imp_importers[self.imp_mods.index(mod)])
+        except ValueError:
+            return set()  # never imported during the suite: nothing depends on it
 
     def fixture(self, ch: FileChange):
         f = ch.old if not ch.added else ch.new
@@ -1274,6 +1305,13 @@ class Selector:
                 # carry docstrings and nested line numbers: it sees even layout edits
                 sel |= {n for i, n in self.ids.items() if i.startswith("tests/test_typing.py::")}
             if path.endswith(DOC_EXT) or path.startswith(("docs/", "posts/", "pdoc/", ".github/")):
+                continue
+            if path in NO_EFFECT_FILES or path.startswith(NO_EFFECT_DIRS):
+                log(f"  {path}: not read by the test run -> nothing")
+                continue
+            if path.startswith("sqlglotc/"):
+                # only tests/test_sqlglotc.py runs sqlglotc/setup.py
+                sel |= self.by_file.get("tests/test_sqlglotc.py", set())
                 continue
             if path.startswith("tests/fixtures/"):
                 r = self.fixture(ch) if not ch.deleted else None

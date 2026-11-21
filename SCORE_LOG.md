@@ -30,7 +30,7 @@ Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit s
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).
 | v17 | `981844f` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | pending | Test helper modules with no test functions (tests/helpers.py, test-package __init__.py) select their importers instead of all tests; validated on 2 such edits against the full suite |
 | v18 | `9b9fcfc` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | Dict-entry value edits select only tests that read the changed keys' values (dict-read probe on the pinned commit). Validated on 25 + 25 fresh dict edits (0 misses; first run found and fixed an enum-key matching bug), then **125 fresh dict edits (46 with real failures): 0 misses**, 1,185.5 s vs v17's 1,455.4 s. Final candidate. |
-| v19 | `HASH` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | v18 + comparison-probe fix: a swap whose partner operator re-enters the same comparison (e.g. inside `__eq__`) counts as differing. Found by a 125-swap validation (1 real miss, V11224); same scores, closes a gap present since v7. Validation of the fix: in progress |
+| v19 | `f206657` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | v18 + comparison-probe fix: a swap whose partner operator re-enters the same comparison (e.g. inside `__eq__`) counts as differing. Found by a 125-swap validation (1 real miss, V11224); same scores, closes a gap present since v7. Validation of the fix: in progress |
 
 ## Final-entry safety
 

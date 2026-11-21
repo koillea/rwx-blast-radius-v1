@@ -22,12 +22,33 @@ for t in tests:
     by_prefix[t["id"].rsplit("::", 1)[0]].append(t["number"])
 
 
+import marshal as _marshal
+import zlib as _zlib
+
+# State built while module Y is imported (class bodies, metaclasses, tries...) is seen by
+# Y's importers AND by every test that uses Y: runs its code or creates its classes,
+# e.g. a test reaching a dialect through the registry without importing it.
+_MAPS = _marshal.loads(_zlib.decompress(open(os.path.join(OUT, "maps.bin.z"), "rb").read()))
+_MSETS = _MAPS["sets"]
+
+
+def users_of(mod):
+    rel = mod.replace(".", "/")
+    out = set()
+    for f in (rel + ".py", rel + "/__init__.py"):
+        for key in ("file_cov", "file_use"):
+            i = _MAPS[key].get(f)
+            if i is not None:
+                out |= set(_MSETS[i])
+    return out
+
+
 def expand(ctx):
     if not ctx:
         return None
     kind, _, nodeid = ctx.partition("|")
-    if kind == "I":
-        return set(IMPORTERS[nodeid]) if nodeid in IMPORTERS else None
+    if kind == "I":  # read while a module was imported: its importers and its users
+        return (set(IMPORTERS[nodeid]) | users_of(nodeid)) if nodeid in IMPORTERS else None
     if kind == "C":
         return {num[nodeid]} if nodeid in num else set()
     if kind in ("S", "T"):

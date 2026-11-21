@@ -37,7 +37,8 @@ def expand(ctx: str) -> tuple[set[int], bool]:
     if kind in ("S", "T"):
         return set(by_prefix.get(nodeid.rsplit("::", 1)[0], [])) or set(by_file.get(nodeid.split("::")[0], [])), False
     if kind == "M":
-        return set(by_file.get(nodeid, [])), True
+        # code run while a test module is imported affects only that module's tests
+        return set(by_file.get(nodeid, [])), False
     return set(), True
 
 
@@ -84,6 +85,9 @@ ctx = {cid: c for cid, c in db.execute("select id, context from context")}
 
 
 def rel(p: str) -> str:
+    root = os.path.abspath(ROOT) + os.sep
+    if p.startswith(root):
+        return os.path.relpath(p, root)
     i = p.find("/sqlglot/sqlglot/")
     return p[i + len("/sqlglot/"):] if i >= 0 else os.path.relpath(p, ROOT)
 
@@ -92,6 +96,7 @@ files = {fid: rel(p) for fid, p in db.execute("select id, path from file")}
 SPANS = {f: spans_for(f) for f in files.values()}
 
 file_tests: dict[str, set[int]] = defaultdict(set)
+body_line_tests: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
 cls_line_tests: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
 unit_tests: dict[tuple[str, int, int], set[int]] = defaultdict(set)
 unit_import: set[tuple[str, int, int]] = set()
@@ -107,6 +112,8 @@ for fid, cid, bits in db.execute("select file_id, context_id, numbits from line_
         for line in lines_here:
             if not any(b <= line <= e for s0, e, q, b in sp):
                 cls_line_tests[f][line] |= tset
+            else:
+                body_line_tests[f][line] |= tset
     for line in lines_here:
         # credit every function whose BODY contains this executed line
         for s, e, q, b in sp:
@@ -126,6 +133,11 @@ for c, mods in usage["uses"].items():
     tset, _ = expand(c)
     for m in mods:
         use_tests[m] |= tset
+class_tests: dict[str, set[int]] = defaultdict(set)
+for c, cls in usage.get("classes", {}).items():
+    tset, _ = expand(c)
+    for k in cls:
+        class_tests[k] |= tset
 fix_tests: dict[str, set[int]] = defaultdict(set)
 for c, fx in usage["fixtures"].items():
     tset, _ = expand(c)
@@ -158,6 +170,7 @@ maps = {
     "file_cov": {f: sorted(file_tests[f]) for f in all_src if file_tests.get(f)},
     "file_use": {f: sorted(use_tests[f]) for f in all_src if use_tests.get(f)},
     "fixtures": {f: sorted(v) for f, v in fix_tests.items()},
+    "class_use": {k: sorted(v) for k, v in class_tests.items()},
     "spans": {f: [[s, e, b] for s, e, _, b in SPANS[f]] for f in SPANS},
     "units": [[f, s, e, sorted(v), int((f, s, e) in unit_import)] for (f, s, e), v in unit_tests.items()],
     "test_spans": test_units,
@@ -165,6 +178,18 @@ maps = {
     "cls_lines": {f: {str(l): sorted(v) for l, v in d.items()} for f, d in cls_line_tests.items()},
 }
 json.dump(maps, open(os.path.join(OUT, "maps.json"), "w"), separators=(",", ":"))
+
+# per-line runtime tests for lines inside function bodies, deduplicated, zlib-compressed
+import zlib
+
+sets: dict[frozenset, int] = {}
+lines_out = {}
+for f, d in body_line_tests.items():
+    lines_out[f] = {str(l): sets.setdefault(frozenset(v), len(sets)) for l, v in d.items()}
+blob = json.dumps({"sets": [sorted(x) for x in sets], "lines": lines_out}, separators=(",", ":")).encode()
+open(os.path.join(OUT, "lines.json.z"), "wb").write(zlib.compress(blob, 9))
+print("line map: lines", sum(len(v) for v in lines_out.values()), "sets", len(sets),
+      "bytes", os.path.getsize(os.path.join(OUT, "lines.json.z")))
 print("units", len(unit_tests), "import-time units", len(unit_import),
       "files", len(maps["file_cov"]), "fixtures", len(maps["fixtures"]),
       "bytes", os.path.getsize(os.path.join(OUT, "maps.json")))

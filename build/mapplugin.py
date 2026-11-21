@@ -55,12 +55,27 @@ class _InlineExecutor:
         return False
 
 
+class _InlineThreadExecutor(_InlineExecutor):
+    def __init__(self, max_workers=None, thread_name_prefix="", initializer=None, initargs=(), **_):
+        if initializer is not None:
+            initializer(*initargs)
+
+    def submit(self, fn, *args, **kwargs):
+        fut = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # noqa: BLE001
+            fut.set_exception(exc)
+        return fut
+
+
 _cf.ProcessPoolExecutor = _InlineExecutor
-_cf.ThreadPoolExecutor = _InlineExecutor
+_cf.ThreadPoolExecutor = _InlineThreadExecutor
 
 # ---------------------------------------------------------------- state
 CUR = [""]
 USES: dict[str, set[str]] = {}
+CLASSES: dict[str, set[str]] = {}
 FIXTURES: dict[str, set[str]] = {}
 _ROOT = os.getcwd()
 _FIX = os.path.join(_ROOT, "tests", "fixtures") + os.sep
@@ -106,10 +121,12 @@ def _record_type(t: type) -> None:
     if not key:
         return
     s = USES.setdefault(key, set())
+    c = CLASSES.setdefault(key, set())
     for k in t.__mro__:
         m = k.__module__
         if m.startswith("sqlglot"):
             s.add(m)
+            c.add(m + ":" + k.__qualname__)
 
 
 def _wrap_init(cls):
@@ -210,6 +227,9 @@ def pytest_sessionfinish(session, exitstatus):
     out = {
         "uses": {k: sorted(mods[m] for m in v if m in mods) for k, v in USES.items()},
         "fixtures": {k: sorted(v) for k, v in FIXTURES.items()},
+        "classes": {k: sorted(
+            mods[c.split(":")[0]] + "::" + c.split(":", 1)[1] for c in v if c.split(":")[0] in mods
+        ) for k, v in CLASSES.items()},
         "nodeids": [i.nodeid for i in session.items],
     }
     with _real_open(os.environ.get("MAPPLUGIN_OUT", "usage.json"), "w") as fh:

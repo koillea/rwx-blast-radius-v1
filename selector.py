@@ -274,8 +274,10 @@ class Selector:
         self.test_spans = m["test_spans"]
         self.cls_lines = {f: {int(k): v for k, v in d.items()} for f, d in m.get("cls_lines", {}).items()}
         self.docstrings = m.get("docstrings", {})
+        self.class_use = m.get("class_use", {})
         self._trees: dict[str, object] = {}
         self._all_src: list[tuple[str, list[str]]] | None = None
+        self._lines = None
         fdirs: dict[str, set[int]] = {}
         for fx, ts in self.fixtures.items():
             fdirs.setdefault(os.path.dirname(fx), set()).update(ts)
@@ -319,6 +321,54 @@ class Selector:
                 inner = (s0, e, b)
         return inner
 
+    def expression_arg_types(self, f, stmt, owner):
+        """An edit to `arg_types` of an expression class C is visible only through C:
+        its instances (and subclasses'), or code that names C. Select tests that created
+        C or a subclass, tests that ran a function naming C, and, for import-time
+        references to C, every test of the file that holds them."""
+        import ast
+
+        if not self.class_use or not f.startswith("sqlglot/expressions/") or len(owner) != 1:
+            return None  # without class-usage data this rule cannot be sound
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            return None
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if [getattr(t, "id", None) for t in targets] != ["arg_types"]:
+            return None
+        cname = owner[0]
+        sel = set(self.class_use.get(f"{f}::{cname}", ()))
+        word = re.compile(r"\b" + re.escape(cname) + r"\b")
+        for g, glines in self._sources():
+            for i, text in enumerate(glines, 1):
+                if cname not in text or not word.search(text):
+                    continue
+                if text.strip().startswith("#") or self._in_docstring(g, i):
+                    continue
+                if g == f and re.match(r"^\s*class\s+" + re.escape(cname) + r"\b", text):
+                    continue  # its own definition
+                if g.startswith("tests/"):
+                    r = self._test_line(g, i)
+                    if r is None:
+                        return None
+                    sel |= r
+                    continue
+                u = self._unit_for(g, i)
+                if u is None or i < u[2]:
+                    fl = self.file_level(g)
+                    if fl is None:
+                        return None
+                    sel |= fl
+                    continue
+                ts, imp = self.units.get((g, u[0], u[1]), (set(), False))
+                if imp:
+                    fl = self.file_level(g)
+                    if fl is None:
+                        return None
+                    sel |= fl
+                sel |= ts
+        log(f"  {f} {cname}.arg_types -> {len(sel)}")
+        return sel
+
     def class_level(self, f, line, ch):
         """Tests that can observe a class/module-level edit at `line`, or None to fall
         back to the whole file. Two cases are narrowed:
@@ -356,7 +406,21 @@ class Selector:
                     elif not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         stmt = n
 
+        owner = []
+
+        def visit_owner(body, path):
+            for n in body:
+                if n.lineno <= line <= n.end_lineno and isinstance(n, ast.ClassDef):
+                    owner[:] = path + [n.name]
+                    visit_owner(n.body, path + [n.name])
+
         visit(tree.body)
+        visit_owner(tree.body, [])
+        expr_rule = self.expression_arg_types(f, stmt, owner)
+        if expr_rule is not None:
+            fl = self.file_level(f)
+            # both are sound over-approximations, so their intersection is too
+            return expr_rule & fl if fl is not None else expr_rule
         if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
             return None
         if any(isinstance(x, (ast.Call, ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.Await))
@@ -409,6 +473,113 @@ class Selector:
             return {self.ids[tid]}
         return set(self.by_file.get(f, ())) or None
 
+    # -------------------------------------------------------------- statement level
+    def _line_map(self):
+        if self._lines is None:
+            import zlib
+
+            p = MAPS.parent / "lines.json.z"
+            try:
+                d = json.loads(zlib.decompress(p.read_bytes()))
+                sets = d["sets"]
+                self._lines = {f: {int(k): sets[v] for k, v in m.items()} for f, m in d["lines"].items()}
+            except OSError:
+                self._lines = {}
+        return self._lines
+
+    @staticmethod
+    def _region(text_lines, s0, e):
+        """Source of lines s0..e, dedented by the indentation of line s0."""
+        import textwrap
+
+        return textwrap.dedent("\n".join(text_lines[s0 - 1:e]))
+
+    @staticmethod
+    def _bindings(fn):
+        import ast
+
+        names, flags = set(), set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                names.add(n.id)
+            elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                flags.add((type(n).__name__, tuple(n.names)))
+            elif isinstance(n, (ast.Yield, ast.YieldFrom, ast.Await)):
+                flags.add(type(n).__name__)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n is not fn:
+                names.add(n.name)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    names.add(a.asname or a.name.split(".")[0])
+            elif isinstance(n, ast.arg):
+                names.add(n.arg)
+        return names, flags
+
+    def statement_tests(self, f, unit, ch):
+        """Tests that executed the statements a function-body edit touches, or None to
+        fall back to the whole function. Sound fallbacks: a pure insertion, a statement
+        no test executed, or any change to the names the function binds or to its
+        yield/await/global/nonlocal (those change behaviour of other statements)."""
+        import ast
+
+        s0, e, b = unit
+        blocks = [blk for blk in ch.blocks if s0 <= blk[0] <= e or (blk[1] and blk[0] + len(blk[1]) - 1 >= s0 and blk[0] <= e)]
+        if not blocks or any(not blk[1] for blk in blocks):
+            return None
+        for blk in blocks:
+            if not (b <= blk[0] and blk[0] + len(blk[1]) - 1 <= e):
+                return None  # touches the header or spills outside the function
+        src = pinned_source(f)
+        if src is None:
+            return None
+        lines = src.split("\n")
+        try:
+            old_fn = ast.parse(self._region(lines, s0, e)).body[0]
+            new_lines = lines[:]
+            for first, removed, added in sorted(blocks, key=lambda x: x[0], reverse=True):
+                new_lines[first - 1:first - 1 + len(removed)] = added
+            new_e = e + sum(len(a) - len(r) for _, r, a in blocks)
+            new_fn = ast.parse(self._region(new_lines, s0, new_e)).body[0]
+        except (SyntaxError, IndexError, ValueError):
+            return None
+        if self._bindings(old_fn) != self._bindings(new_fn):
+            return None
+        # owning statement of each changed line (offsets: region line 1 == file line s0)
+        owners = []
+        changed = set()
+        for first, removed, _ in blocks:
+            changed.update(range(first, first + len(removed)))
+        stmts = []
+        for n in ast.walk(old_fn):
+            if isinstance(n, ast.stmt) and n is not old_fn:
+                kids = [c for fld in ("body", "orelse", "finalbody") for c in (getattr(n, fld, None) or [])]
+                for h in getattr(n, "handlers", None) or []:
+                    kids.append(h)
+                hdr_end = (min(c.lineno for c in kids) - 1) if kids else n.end_lineno
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.decorator_list:
+                    start = min(d.lineno for d in n.decorator_list)
+                else:
+                    start = n.lineno
+                stmts.append((start + s0 - 1, max(hdr_end, n.lineno) + s0 - 1))
+        for L in changed:
+            best = None
+            for a, z in stmts:
+                if a <= L <= z and (best is None or z - a < best[1] - best[0]):
+                    best = (a, z)
+            if best is None:
+                return None
+            owners.append(best)
+        lm = self._line_map().get(f, {})
+        sel: set[int] = set()
+        for a, z in owners:
+            got = set()
+            for L in range(a, z + 1):
+                got.update(lm.get(L, ()))
+            if not got:
+                return None  # nobody executed it: fall back to the function
+            sel |= got
+        return sel
+
     def source(self, ch: FileChange):
         f = ch.old
         sel: set[int] = set()
@@ -424,7 +595,9 @@ class Selector:
             if inner is None:
                 narrowed = self.class_level(f, line, ch)
                 if narrowed is not None:
-                    sel |= narrowed
+                    fl = self.file_level(f)
+                    # both are sound over-approximations: keep only what both require
+                    sel |= (narrowed & fl) if fl is not None else narrowed
                     continue
                 fl = self.file_level(f)
                 if fl is None:
@@ -433,6 +606,11 @@ class Selector:
                 sel |= fl
                 continue
             ts, imp = self.units.get((f, inner[0], inner[1]), (set(), False))
+            if not imp and line >= inner[2]:
+                st = self.statement_tests(f, inner, ch)
+                if st is not None:
+                    log(f"  {f}:{line} statement-level -> {len(st)} (function had {len(ts)})")
+                    ts = st
             sel |= ts
             if imp:
                 fl = self.file_level(f)

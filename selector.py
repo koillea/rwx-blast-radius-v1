@@ -1562,6 +1562,9 @@ def main():
     for p in sorted((DATA / "commits").glob("*.patch")):
         log(p.stem)
         chosen = sel.select(parse_patch(p.read_text(encoding="utf-8", errors="replace")))
+        # PROBE ONLY (branch probe-noslow): never select a test slower than 5 s. Measures what
+        # slow tests cost us and how often they fail. Never the final.
+        chosen = {n for n in chosen if dur[n] <= 5000}
         out.append(json.dumps({"commit": p.stem, "workers": split(sorted(chosen), dur)}))
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
 

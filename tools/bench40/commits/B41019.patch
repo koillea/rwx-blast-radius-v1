@@ -1,0 +1,11 @@
+diff --git a/sqlglot/parsers/teradata.py b/sqlglot/parsers/teradata.py
+--- a/sqlglot/parsers/teradata.py
++++ b/sqlglot/parsers/teradata.py
+@@ -351,6 +351,7 @@
+                     self.raise_error(f"Expected value after {attribute}")
+                 elif attribute == "NAMED" and not isinstance(value, exp.Identifier):
+                     self.raise_error("Expected alias after NAMED")
++                # Intentionally not cached
+                 elif attribute == "TITLE" and not value.is_string:
+                     self.raise_error("Expected string literal after TITLE")
+                 attributes[attribute] = value

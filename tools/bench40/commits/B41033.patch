@@ -1,0 +1,21 @@
+diff --git a/sqlglot/generators/prql.py b/sqlglot/generators/prql.py
+--- a/sqlglot/generators/prql.py
++++ b/sqlglot/generators/prql.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++# Keep in sync with the generator
+ from sqlglot import generator
+ 
+ 
+diff --git a/sqlglot/errors.py b/sqlglot/errors.py
+--- a/sqlglot/errors.py
++++ b/sqlglot/errors.py
+@@ -41,6 +41,7 @@
+         errors: list[dict[str, t.Any]] | None = None,
+     ):
+         super().__init__(message)
++        # Intentionally not cached
+         self.errors = errors or []
+ 
+     @classmethod

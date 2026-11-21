@@ -1,0 +1,11 @@
+diff --git a/sqlglot/expressions/math.py b/sqlglot/expressions/math.py
+--- a/sqlglot/expressions/math.py
++++ b/sqlglot/expressions/math.py
+@@ -88,6 +88,7 @@
+     pass
+ 
+ 
++# Intentionally not cached
+ class Tanh(Expression, Func):
+     pass
+ 

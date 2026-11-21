@@ -1,0 +1,22 @@
+diff --git a/sqlglot/planner.py b/sqlglot/planner.py
+--- a/sqlglot/planner.py
++++ b/sqlglot/planner.py
+@@ -108,6 +108,7 @@
+ 
+         from_ = expression.args.get("from_")
+ 
++        # Keep in sync with the generator
+         if isinstance(expression, exp.Select) and from_:
+             step = Scan.from_expression(from_.this, ctes)
+         elif isinstance(expression, exp.SetOperation):
+diff --git a/sqlglot/dialects/trino.py b/sqlglot/dialects/trino.py
+--- a/sqlglot/dialects/trino.py
++++ b/sqlglot/dialects/trino.py
+@@ -8,6 +8,7 @@
+ 
+ class Trino(Presto):
+     SUPPORTS_USER_DEFINED_TYPES = False
++    # Cheap check first
+     LOG_BASE_FIRST = True
+     CONCAT_WS_COALESCE = True
+ 

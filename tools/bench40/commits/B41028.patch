@@ -1,0 +1,12 @@
+diff --git a/sqlglot/time.py b/sqlglot/time.py
+--- a/sqlglot/time.py
++++ b/sqlglot/time.py
+@@ -77,7 +77,7 @@
+         subsecond_digit_count = len(str(parsed.microsecond).zfill(6).rstrip("0"))
+         precision = 0
+         if subsecond_digit_count > 3:
+-            precision = 6
++            precision = 5
+         elif subsecond_digit_count > 0:
+             precision = 3
+         return precision

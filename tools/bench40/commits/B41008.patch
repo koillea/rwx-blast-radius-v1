@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/merge_subqueries.sql b/tests/fixtures/optimizer/merge_subqueries.sql
+--- a/tests/fixtures/optimizer/merge_subqueries.sql
++++ b/tests/fixtures/optimizer/merge_subqueries.sql
+@@ -548,7 +548,7 @@
+     VALUES (1) AS a1(cola)
+ ), t2 AS (
+   SELECT
+-    a2.cola
++    a2.42 cola
+   FROM
+     VALUES (1) AS a2(cola)
+ )

@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/jsonpath/cts.json b/tests/fixtures/jsonpath/cts.json
+--- a/tests/fixtures/jsonpath/cts.json
++++ b/tests/fixtures/jsonpath/cts.json
+@@ -1735,7 +1735,7 @@
+         },
+         {
+           "a": "d",
+-          "d": "f"
++          "42 d": "f"
+         }
+       ],
+       "result": [

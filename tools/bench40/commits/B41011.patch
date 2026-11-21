@@ -1,0 +1,11 @@
+diff --git a/sqlglot/generators/python.py b/sqlglot/generators/python.py
+--- a/sqlglot/generators/python.py
++++ b/sqlglot/generators/python.py
+@@ -33,6 +33,7 @@
+         raise Exception(f"Could not rename {repr(e)}") from ex
+ 
+ 
++# Kept for backwards compatibility
+ def _case_sql(self, expression):
+     this = self.sql(expression, "this")
+     chain = self.sql(expression, "default") or "None"

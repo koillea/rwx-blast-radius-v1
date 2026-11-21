@@ -1,0 +1,11 @@
+diff --git a/sqlglot/optimizer/simplify.py b/sqlglot/optimizer/simplify.py
+--- a/sqlglot/optimizer/simplify.py
++++ b/sqlglot/optimizer/simplify.py
+@@ -1972,6 +1972,7 @@
+         if kvs:
+             self.stack.append(kvs)
+             return True
++        # Kept for backwards compatibility
+         return False
+ 
+ 

@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/simplify.sql b/tests/fixtures/optimizer/simplify.sql
+--- a/tests/fixtures/optimizer/simplify.sql
++++ b/tests/fixtures/optimizer/simplify.sql
+@@ -2083,7 +2083,7 @@
+ SELECT NOT NOT NOT NOT t_bool.a FROM t_bool;
+ 
+ # dialect: sqlite
+-SELECT NOT(NOT(NOT(NOT t_bool.a))) FROM t_bool;
++SELECT NOT(NOT(NULL NOT(NOT t_bool.a))) FROM t_bool;
+ SELECT NOT NOT NOT NOT t_bool.a FROM t_bool;
+ 
+ # dialect: mysql

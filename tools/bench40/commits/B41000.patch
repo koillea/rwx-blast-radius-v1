@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/string.py b/sqlglot/expressions/string.py
+--- a/sqlglot/expressions/string.py
++++ b/sqlglot/expressions/string.py
+@@ -566,7 +566,7 @@
+ 
+ class MD5Digest(Expression, Func):
+     arg_types = {"this": True, "expressions": False}
+-    is_var_len_args = True
++    is_var_len_args = False
+     _sql_names = ["MD5_DIGEST"]
+ 
+ 

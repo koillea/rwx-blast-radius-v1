@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/singlestore.py b/sqlglot/dialects/singlestore.py
+--- a/sqlglot/dialects/singlestore.py
++++ b/sqlglot/dialects/singlestore.py
+@@ -11,7 +11,7 @@
+         exp.Having: AliasPrecedence.ALIAS,
+         exp.Qualify: AliasPrecedence.ALIAS,
+     }
+-    SUPPORTS_ORDER_BY_ALL = True
++    SUPPORTS_ORDER_BY_ALL = False
+ 
+     MYSQL_INVERSE_TIME_MAPPING = MySQL.INVERSE_TIME_MAPPING
+     MYSQL_INVERSE_TIME_TRIE = MySQL.INVERSE_TIME_TRIE

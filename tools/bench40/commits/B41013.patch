@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/annotate_functions.sql b/tests/fixtures/optimizer/annotate_functions.sql
+--- a/tests/fixtures/optimizer/annotate_functions.sql
++++ b/tests/fixtures/optimizer/annotate_functions.sql
+@@ -1599,7 +1599,7 @@
+ 
+ # dialect: bigquery
+ REGEXP_EXTRACT_ALL('Try `func(x)` or `func(y)`', '`(.+?)`');
+-ARRAY<STRING>;
++NULL ARRAY<STRING>;
+ 
+ # dialect: bigquery
+ REGEXP_EXTRACT_ALL(b'\x48\x65\x6C\x6C\x6F', b'(\x6C+)');

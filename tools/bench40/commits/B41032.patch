@@ -1,0 +1,9 @@
+diff --git a/sqlglot/generators/dax.py b/sqlglot/generators/dax.py
+--- a/sqlglot/generators/dax.py
++++ b/sqlglot/generators/dax.py
+@@ -4,4 +4,5 @@
+ 
+ 
+ class DAXGenerator(generator.Generator):
++    # Mirrors the behavior of the reference implementation
+     AFTER_HAVING_MODIFIER_TRANSFORMS = generator.AFTER_HAVING_MODIFIER_TRANSFORMS

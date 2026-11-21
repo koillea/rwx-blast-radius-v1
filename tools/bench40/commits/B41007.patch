@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parsers/spark.py b/sqlglot/parsers/spark.py
+--- a/sqlglot/parsers/spark.py
++++ b/sqlglot/parsers/spark.py
+@@ -98,7 +98,7 @@
+         "TIMESTAMP_LTZ": build_as_cast("TIMESTAMP_LTZ"),
+         "TIMESTAMP_NTZ": build_as_cast("TIMESTAMP_NTZ"),
+         "TRY_ELEMENT_AT": lambda args: exp.Bracket(
+-            this=seq_get(args, 0),
++            this=seq_get(args, 1),
+             expressions=ensure_list(seq_get(args, 1)),
+             offset=1,
+             safe=True,

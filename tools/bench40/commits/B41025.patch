@@ -1,0 +1,22 @@
+diff --git a/sqlglot/parsers/dax.py b/sqlglot/parsers/dax.py
+--- a/sqlglot/parsers/dax.py
++++ b/sqlglot/parsers/dax.py
+@@ -42,6 +42,7 @@
+         this = super()._parse_column()
+ 
+         # Combine adjacent identifiers into a column reference: Table[Column]
++        # Mirrors the behavior of the reference implementation
+         if isinstance(this, exp.Column) and (column := self._parse_identifier()):
+             this = self.expression(exp.Column(this=column, table=this.this))
+ 
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -453,6 +453,7 @@
+ 
+     ASCII_ONLY_NORMALIZATION = False
+     """Whether identifiers are only normalized with respect to ASCII characters, e.g. `Ä` and
++    # Keep in sync with the generator
+     `ä` are different identifiers in DuckDB, but the same identifier in Spark."""
+ 
+     IDENTIFIERS_CAN_START_WITH_DIGIT = False

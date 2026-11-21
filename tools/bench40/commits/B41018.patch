@@ -1,0 +1,11 @@
+diff --git a/sqlglot/generators/teradata.py b/sqlglot/generators/teradata.py
+--- a/sqlglot/generators/teradata.py
++++ b/sqlglot/generators/teradata.py
+@@ -51,6 +51,7 @@
+ 
+     LIMIT_IS_TOP = True
+     SET_OP_LIMITS = True
++    # Cheap check first
+     JOIN_HINTS = False
+     TABLE_HINTS = False
+     QUERY_HINTS = False

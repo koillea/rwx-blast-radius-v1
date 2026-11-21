@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/eliminate_joins.sql b/tests/fixtures/optimizer/eliminate_joins.sql
+--- a/tests/fixtures/optimizer/eliminate_joins.sql
++++ b/tests/fixtures/optimizer/eliminate_joins.sql
+@@ -72,7 +72,7 @@
+     SUM(y.c)
+   FROM y
+   GROUP BY y.b
+-) AS y
++) ASx y
+   ON x.b = y.b;
+ SELECT
+   x.a

@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/exasol.py b/sqlglot/generators/exasol.py
+--- a/sqlglot/generators/exasol.py
++++ b/sqlglot/generators/exasol.py
+@@ -353,7 +353,7 @@
+         exp.TsOrDsDiff: _date_diff_sql,
+         exp.DayOfWeek: lambda self, e: f"CAST(TO_CHAR({self.sql(e, 'this')}, 'D') AS INTEGER)",
+         exp.DatetimeTrunc: timestamptrunc_sql(),
+-        exp.GroupConcat: lambda self, e: groupconcat_sql(self, e, on_overflow=True),
++        exp.GroupConcat: lambda self, e: groupconcat_sql(self, e, on_overflow=False),
+         # https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/edit_distance.htm#EDIT_DISTANCE
+         exp.Levenshtein: unsupported_args("ins_cost", "del_cost", "sub_cost", "max_dist")(
+             rename_func("EDIT_DISTANCE")

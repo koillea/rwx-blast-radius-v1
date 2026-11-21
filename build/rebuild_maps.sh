@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuild maps/maps.json from the pinned sqlglot commit. Run once, offline from scoring;
+# Rebuild maps/ from the pinned sqlglot commit. Run once, offline from scoring;
 # the result is committed so the Docker build needs no network and takes seconds.
 #
 #   bash build/rebuild_maps.sh /path/to/tests.json
@@ -29,4 +29,4 @@ python3 "$HERE/build_maps.py" . "$TESTS_JSON" "$HERE/../maps"
 rm -f cmpprobe.json
 PYTHONPATH="$HERE" CMPPROBE_OUT="$PWD/cmpprobe.json" MAPPLUGIN_OUT=/dev/null \
   python3 -m pytest tests/ -p cmpprobe -p mapplugin -p no:cacheprovider -q
-python3 "$HERE/build_cmp.py" cmpprobe.json "$TESTS_JSON" "$HERE/../maps"
+python3 "$HERE/build_cmp.py" cmpprobe.json "$TESTS_JSON" "$HERE/../maps" importers.json

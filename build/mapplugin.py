@@ -97,6 +97,147 @@ def _set(key: str) -> None:
         cov.switch_context(key)
 
 
+# ---------------------------------------------------------------- imports
+# Code that runs while a module is being imported counts for every test that imports
+# that module (a failing import fails all of them), not for whichever test happened to
+# trigger the import first. Each first import of a sqlglot or tests module runs under
+# the context "I|<module>", and every import request is recorded:
+#   EDGES[importer] = modules requested while `importer` was being imported
+#   RUNTIME[ctx]    = modules requested while a test phase ran (outside any import)
+import builtins as _b
+import importlib as _il
+import importlib.abc as _ilabc
+
+STACK: list = []
+CREATED: dict = {}  # module -> classes (with their bases) defined while it was imported
+EDGES: dict = {}
+RUNTIME: dict = {}
+MODFILE: dict = {}
+_OURS = ("sqlglot", "tests")
+
+
+def _ours(name):
+    return name.split(".")[0] in _OURS
+
+
+def _note(name):
+    if not name or not _ours(name):
+        return
+    if STACK:
+        EDGES.setdefault(STACK[-1], set()).add(name)
+    else:
+        RUNTIME.setdefault(CUR[0], set()).add(name)
+
+
+_real_import = _b.__import__
+
+
+def _import(name, globals=None, locals=None, fromlist=(), level=0):
+    mod = _real_import(name, globals, locals, fromlist, level)
+    try:
+        full = name
+        if level:
+            pkg = (globals or {}).get("__package__") or ""
+            parts = pkg.split(".")
+            base = ".".join(parts[: len(parts) - (level - 1)]) if level > 1 else pkg
+            full = f"{base}.{name}" if name else base
+        _note(full)
+        for item in fromlist or ():
+            sub = f"{full}.{item}"
+            if sub in sys.modules:
+                _note(sub)
+            else:  # `from pkg import Name`: a package __getattr__ may have loaded a module
+                obj = getattr(sys.modules.get(full), item, None)
+                m = getattr(obj, "__module__", None)
+                if isinstance(m, str):
+                    _note(m)
+    except Exception:  # noqa: BLE001 - recording must never change behaviour
+        pass
+    return mod
+
+
+_b.__import__ = _import
+_real_import_module = _il.import_module
+
+
+def _import_module(name, package=None):
+    mod = _real_import_module(name, package)
+    try:
+        _note(mod.__name__)
+    except Exception:  # noqa: BLE001
+        pass
+    return mod
+
+
+_il.import_module = _import_module
+
+
+class _CtxLoader(_ilabc.Loader):
+    """Per-module wrapper: runs the real loader under the module's import context.
+    (Loaders can be shared between modules, e.g. pytest's rewriting hook, so the
+    real loader is never modified.)"""
+
+    def __init__(self, inner, name):
+        self._inner, self._name = inner, name
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+    def create_module(self, spec):
+        return self._inner.create_module(spec)
+
+    def exec_module(self, module):
+        _note(self._name)
+        f = getattr(module, "__file__", None)
+        if f:
+            MODFILE[self._name] = f
+        prev = CUR[0]
+        STACK.append(self._name)
+        _set("I|" + self._name)
+        try:
+            self._inner.exec_module(module)
+        finally:
+            STACK.pop()
+            _set(prev)
+        try:
+            got = CREATED.setdefault(self._name, set())
+            todo = [v for v in vars(module).values() if isinstance(v, type) and v.__module__ == self._name]
+            seen = set()
+            while todo:
+                c = todo.pop()
+                if c in seen:
+                    continue
+                seen.add(c)
+                for k in c.__mro__:
+                    if k.__module__.startswith("sqlglot"):
+                        got.add(k.__module__ + ":" + k.__qualname__)
+                todo.extend(v for v in vars(c).values() if isinstance(v, type) and v.__module__ == self._name)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class _ImportContext(_ilabc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if not _ours(fullname):
+            return None
+        for finder in sys.meta_path:
+            if finder is self or not hasattr(finder, "find_spec"):
+                continue
+            spec = finder.find_spec(fullname, path, target)
+            if spec is not None:
+                break
+        else:
+            return None
+        loader = spec.loader
+        if loader is None or isinstance(loader, _CtxLoader) or not hasattr(loader, "exec_module"):
+            return spec
+        spec.loader = _CtxLoader(loader, fullname)
+        return spec
+
+
+sys.meta_path.insert(0, _ImportContext())
+
+
 # ---------------------------------------------------------------- fixture reads
 _real_open = builtins.open
 
@@ -191,6 +332,15 @@ _install_class_hooks()
 import pytest  # noqa: E402
 
 
+def pytest_collection(session):
+    # pytest's assertion-rewriting finder goes to the front of sys.meta_path at start-up;
+    # put ours back in front so test modules get import contexts too (ours delegates).
+    for f in list(sys.meta_path):
+        if isinstance(f, _ImportContext):
+            sys.meta_path.remove(f)
+            sys.meta_path.insert(0, f)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_make_collect_report(collector):
     if collector.__class__.__name__ == "Module":
@@ -231,6 +381,12 @@ def pytest_sessionfinish(session, exitstatus):
             mods[c.split(":")[0]] + "::" + c.split(":", 1)[1] for c in v if c.split(":")[0] in mods
         ) for k, v in CLASSES.items()},
         "nodeids": [i.nodeid for i in session.items],
+        "edges": {k: sorted(v) for k, v in EDGES.items()},
+        "runtime_imports": {k: sorted(v) for k, v in RUNTIME.items()},
+        "modfile": {k: os.path.relpath(v, _ROOT) for k, v in MODFILE.items()},
+        "created": {k: sorted(
+            mods[c.split(":")[0]] + "::" + c.split(":", 1)[1] for c in v if c.split(":")[0] in mods
+        ) for k, v in CREATED.items()},
     }
     with _real_open(os.environ.get("MAPPLUGIN_OUT", "usage.json"), "w") as fh:
         json.dump(out, fh)

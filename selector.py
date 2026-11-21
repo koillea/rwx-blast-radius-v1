@@ -22,7 +22,7 @@ from bisect import bisect_right
 from pathlib import Path
 
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
-MAPS = Path(__file__).resolve().parent / "maps" / "maps.json"
+MAPS = Path(__file__).resolve().parent / "maps" / "maps.json.z"
 MAX_WORKERS = 8
 WORKER_MS = 2000
 VERBOSE = os.environ.get("BR_VERBOSE") == "1"
@@ -290,7 +290,10 @@ DOC_EXT = (".md", ".rst", ".txt", ".png", ".svg", ".html")
 
 class Selector:
     def __init__(self, tests):
-        m = json.loads(MAPS.read_text())
+        import zlib
+
+        m = json.loads(zlib.decompress(MAPS.read_bytes()))
+        S = [frozenset(x) for x in m["sets"]]  # each distinct test set, stored once
         self._cmp = None
         self.all = {t["number"] for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
@@ -299,15 +302,21 @@ class Selector:
         for t in tests:
             self.by_file.setdefault(t["file"], set()).add(t["number"])
             self.by_class.setdefault(t["id"].rsplit("::", 1)[0], set()).add(t["number"])
-        self.file_cov = m["file_cov"]
-        self.file_use = m["file_use"]
-        self.fixtures = m["fixtures"]
+        self.file_cov = {f: S[i] for f, i in m["file_cov"].items()}
+        self.file_use = {f: S[i] for f, i in m["file_use"].items()}
+        self.fixtures = {f: S[i] for f, i in m["fixtures"].items()}
         self.spans = {f: sorted(v) for f, v in m["spans"].items()}
-        self.units = {(f, s, e): (set(ts), bool(imp)) for f, s, e, ts, imp in m["units"]}
+        self.units = {(f, s, e): (S[ts], bool(imp)) for f, s, e, ts, imp in m["units"]}
         self.test_spans = m["test_spans"]
-        self.cls_lines = {f: {int(k): v for k, v in d.items()} for f, d in m.get("cls_lines", {}).items()}
+        self.cls_lines = {f: {int(k): S[v] for k, v in d.items()} for f, d in m.get("cls_lines", {}).items()}
         self.docstrings = m.get("docstrings", {})
-        self.class_use = m.get("class_use", {})
+        self.class_use = {k: S[i] for k, i in m.get("class_use", {}).items()}
+        # import-time data: which module imports ran each line, which imports used or
+        # defined each class, and each imported module's importers (tests that fail
+        # if importing it fails)
+        self.imp_importers = [S[i] for i in m.get("imp_importers", [])]
+        self.imp_line_mods = {f: {int(k): v for k, v in d.items()} for f, d in m.get("imp_line_mods", {}).items()}
+        self.touched = m.get("touched", {})
         self._trees: dict[str, object] = {}
         self._all_src: list[tuple[str, list[str]]] | None = None
         self._lines = None
@@ -319,7 +328,9 @@ class Selector:
     def file_level(self, f):
         cov, use = self.file_cov.get(f), self.file_use.get(f)
         if cov is None and use is None:
-            return None
+            # a known module that only ran while being imported: no runtime observers
+            # (what an import can expose is added by import_exposure/header_exposure)
+            return set() if (f in self.imp_line_mods or f in self.spans) else None
         return set(cov or ()) | set(use or ())
 
     # -------------------------------------------------------------- class/module level
@@ -486,7 +497,8 @@ class Selector:
                     if lam is None or (b.end_lineno - b.lineno) < (lam.end_lineno - lam.lineno):
                         lam = b
         if lam is not None and all(lam.lineno < l < lam.end_lineno for l in changed if abs(l - line) <= 1):
-            return set(self.cls_lines.get(f, {}).get(line, ()))
+            # calls at run time, and calls made while some module was being imported
+            return set(self.cls_lines.get(f, {}).get(line, ())) | self.imp_tests(f, line)
         # an edit whose every change lies inside one lambda body (checked on the ASTs)
         # is seen only by calls of that lambda; each call runs a line of the body
         body = None
@@ -499,6 +511,8 @@ class Selector:
             sel = set()
             for l in range(body.body.lineno, body.body.end_lineno + 1):
                 sel |= set(cl.get(l, ()))
+                if l != body.lineno:  # the `lambda` line itself also runs when it is defined
+                    sel |= self.imp_tests(f, l)
             log(f"  {f}:{line} confined to lambda body -> {len(sel)}")
             return sel
         # ---- simple constant assignment
@@ -687,6 +701,194 @@ class Selector:
             sel |= got
         return sel
 
+    # ------------------------------------------------------------ import-time exposure
+    def imp_tests(self, f, line, only=None):
+        """Importers of every module whose import ran f:line (optionally only those
+        modules in `only`)."""
+        out = set()
+        for y in self.imp_line_mods.get(f, {}).get(line, ()):
+            if only is None or y in only:
+                out |= self.imp_importers[y]
+        return out
+
+    def _stmt_pairs(self, f, ch):
+        """[(old_stmt, new_stmt)] for the module/class-level statements the edit touches,
+        or None when they cannot be paired (then every importer is exposed)."""
+        import ast
+
+        src = pinned_source(f)
+        try:
+            old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
+        except (SyntaxError, TypeError):
+            return None
+
+        def flat(tree):
+            out = []
+
+            def walk(body, path):
+                for n in body:
+                    out.append((path, n))
+                    if isinstance(n, ast.ClassDef):
+                        walk(n.body, path + (n.name,))
+            walk(tree.body, ())
+            return out
+
+        a, b = flat(old_t), flat(new_t)
+        if len(a) != len(b):
+            return None
+        pairs = []
+        for (pa, x), (pb, y) in zip(a, b):
+            if pa != pb or type(x) is not type(y):
+                return None
+            if isinstance(x, ast.ClassDef):
+                continue  # its body statements are compared on their own
+            if ast.dump(x) != ast.dump(y):
+                if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue  # function edits are handled per statement elsewhere
+                pairs.append((x, y, pa))
+        return pairs
+
+    @staticmethod
+    def _may_raise(old, new) -> bool:
+        """Can evaluating `new` at import fail where `old` did not? Only literals,
+        containers, unary minus/plus/not, lambdas (not called here) and the names and
+        attribute chains `old` already used are safe."""
+        import ast
+
+        def refs(n):
+            out = set()
+            for x in ast.walk(n):
+                if isinstance(x, (ast.Name, ast.Attribute)):
+                    out.add(ast.dump(x))
+            return out
+
+        def safe(n, known):
+            if isinstance(n, ast.Constant):
+                return True
+            if isinstance(n, (ast.Tuple, ast.List, ast.Set)):
+                return all(safe(e, known) for e in n.elts)
+            if isinstance(n, ast.Dict):
+                return all(k is None or safe(k, known) for k in n.keys) and all(safe(v, known) for v in n.values)
+            if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd, ast.Not)):
+                return safe(n.operand, known)
+            if isinstance(n, ast.Lambda):
+                return all(safe(d, known) for d in n.args.defaults + [d for d in n.args.kw_defaults if d is not None])
+            if isinstance(n, (ast.Name, ast.Attribute)):
+                return ast.dump(n) in known
+            if isinstance(n, ast.Starred):
+                return safe(n.value, known)
+            return False
+
+        if isinstance(new, ast.Assign) and isinstance(old, ast.Assign):
+            if [ast.dump(t) for t in new.targets] != [ast.dump(t) for t in old.targets]:
+                return True
+            return not safe(new.value, refs(old.value))
+        if isinstance(new, ast.AnnAssign) and isinstance(old, ast.AnnAssign):
+            if ast.dump(new.target) != ast.dump(old.target) or ast.dump(new.annotation) != ast.dump(old.annotation):
+                return True
+            return new.value is not None and not safe(new.value, refs(old.value) if old.value is not None else set())
+        return True
+
+    def header_exposure(self, f, ch, inner):
+        """A function header (decorators, defaults, annotations) is evaluated when the
+        `def` runs, i.e. at import. If the edited header may now raise, every importer
+        of those lines is exposed."""
+        import ast
+
+        everyone = set()
+        for l in range(inner[0], inner[2]):
+            everyone |= self.imp_tests(f, l)
+        if not everyone:
+            return set()
+        src = pinned_source(f)
+        try:
+            old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
+        except (SyntaxError, TypeError):
+            return everyone
+        lazy = any(isinstance(n, ast.ImportFrom) and n.module == "__future__" and any(a.name == "annotations" for a in n.names)
+                   for n in old_t.body)
+
+        def find(t):
+            for n in ast.walk(t):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    st = min([d.lineno for d in n.decorator_list] + [n.lineno])
+                    if st == inner[0]:
+                        return n
+            return None
+
+        a, b = find(old_t), find(new_t)
+        if a is None or b is None or a.name != b.name:
+            return everyone
+
+        def exprs(n):
+            out = list(n.decorator_list) + list(n.args.defaults) + [d for d in n.args.kw_defaults if d is not None]
+            if not lazy:
+                out += [x.annotation for x in n.args.args + n.args.kwonlyargs + n.args.posonlyargs if x.annotation is not None]
+                out += [n.returns] if n.returns is not None else []
+            return out
+
+        ea, eb = exprs(a), exprs(b)
+        if len(ea) != len(eb):
+            return everyone
+        for x, y in zip(ea, eb):
+            if ast.dump(x) != ast.dump(y) and self._may_raise(
+                    ast.Assign(targets=[ast.Name("_")], value=x), ast.Assign(targets=[ast.Name("_")], value=y)):
+                return everyone
+        return set()
+
+    def import_exposure(self, f, ch):
+        """Tests that a module/class-level edit can reach through an import:
+          * if the new statement may raise, the importers of every import that ran it;
+          * for each name it assigns, the importers of every import Y that ran a line
+            mentioning that name, where the statement is in a class C, only if C (or a
+            subclass) was used or defined during Y, or the line names C itself."""
+        import ast
+
+        sel: set[int] = set()
+        pairs = self._stmt_pairs(f, ch)
+        if pairs is None:
+            for l in ch.lines:
+                sel |= self.imp_tests(f, l)
+            return sel, True
+        def blank_lambdas(n):
+            n = copy.deepcopy(n)
+            for x in ast.walk(n):
+                if isinstance(x, ast.Lambda):
+                    x.body = ast.Constant(None)
+            return ast.dump(n)
+
+        import copy
+
+        for old, new, path in pairs:
+            if blank_lambdas(old) == blank_lambdas(new):
+                # only lambda bodies changed: the value is otherwise identical, and a
+                # changed body is seen only by its calls, which the lambda rule counts
+                # (including calls made during imports)
+                continue
+            if self._may_raise(old, new):
+                for l in range(old.lineno, old.end_lineno + 1):
+                    sel |= self.imp_tests(f, l)
+            names = set()
+            for x in (old, new):
+                tg = x.targets if isinstance(x, ast.Assign) else [x.target] if isinstance(x, ast.AnnAssign) else []
+                for t in tg:
+                    for n in ast.walk(t):
+                        if isinstance(n, ast.Name):
+                            names.add(n.id)
+            touched = set(self.touched.get(f"{f}::{'.'.join(path)}", ())) if path else None
+            cword = re.compile(r"\b" + re.escape(path[-1]) + r"\b") if path else None
+            for name in names:
+                word = re.compile(r"\b" + re.escape(name) + r"\b")
+                for g, glines in self._sources():
+                    gl = self.imp_line_mods.get(g)
+                    if not gl:
+                        continue
+                    for i, text in enumerate(glines, 1):
+                        if i in gl and name in text and word.search(text):
+                            only = None if (touched is None or cword.search(text)) else touched
+                            sel |= self.imp_tests(g, i, only)
+        return sel, False
+
     def source(self, ch: FileChange):
         f = ch.old
         sel: set[int] = set()
@@ -694,12 +896,19 @@ class Selector:
         if spans is None:
             log(f"  {f}: unknown source file -> all")
             return None
+        exposed_done = False
         for line in sorted(ch.lines):
             inner = None
             for s, e, b in spans:
                 if s <= line <= e and (inner is None or e - s < inner[1] - inner[0]):
                     inner = (s, e, b)
             if inner is None:
+                if not exposed_done:
+                    exposed_done = True
+                    exp_sel, _ = self.import_exposure(f, ch)
+                    if exp_sel:
+                        log(f"  {f}: import-time exposure -> {len(exp_sel)}")
+                    sel |= exp_sel
                 narrowed = self.class_level(f, line, ch)
                 if narrowed is not None:
                     fl = self.file_level(f)
@@ -713,6 +922,11 @@ class Selector:
                 sel |= fl
                 continue
             ts, imp = self.units.get((f, inner[0], inner[1]), (set(), False))
+            if line < inner[2]:
+                hx = self.header_exposure(f, ch, inner)
+                if hx:
+                    log(f"  {f}:{line} header may raise at import -> {len(hx)}")
+                sel |= hx
             if not imp and line >= inner[2]:
                 st = self.statement_tests(f, inner, ch)
                 if st is not None:

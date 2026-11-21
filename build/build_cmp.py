@@ -1,6 +1,6 @@
 """Turn the comparison-probe run (cmpprobe.json) into maps/cmp.json.
 
-usage:  python build_cmp.py <cmpprobe.json> <tests.json> <out_dir>
+usage:  python build_cmp.py <cmpprobe.json> <tests.json> <out_dir> <importers.json>
 Output: {"files": [...instrumented files...],
          "diff": {"file:line:col:op": [test numbers] | null}}   null = seen at import time
 A site missing from "diff" never gave a different result under its partner operator.
@@ -19,10 +19,15 @@ for t in tests:
     by_prefix[t["id"].rsplit("::", 1)[0]].append(t["number"])
 
 
+IMPORTERS = json.load(open(sys.argv[4])) if len(sys.argv) > 4 else {}
+
+
 def expand(ctx):
     if not ctx:
         return None
     kind, _, nodeid = ctx.partition("|")
+    if kind == "I":
+        return set(IMPORTERS[nodeid]) if nodeid in IMPORTERS else None
     if kind == "C":
         return {num[nodeid]} if nodeid in num else set()
     if kind in ("S", "T"):

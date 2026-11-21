@@ -21,9 +21,32 @@ Simulated = test seconds (busiest worker per commit) + worker seconds (2 s per w
 | v11 | `0c974ed` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.34 | **200.8** (200.14 + 0.61) | Same picks, ~43% less CPU (marshal maps, lazy sets) |
 | v12 | `db8a029` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.38 | - | Discarded string statements are no-ops; instance-read rule for more expression attributes |
 | v13 | `668ce0b` | 120.1 | 119.652 | 63.652 | 56 | 0 | 0.46 | - | Constant readers narrowed to the reading statement |
-| v14 | `edd4829` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | **200.9** (200.14 + 0.71) | One-line lambdas (generator TRANSFORMS) |
+| v14 | `edd4829` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | **200.9** (200.14 + 0.71; identical simulated to v11: no hidden commit hit v12-v14 rules) | One-line lambdas (generator TRANSFORMS) |
 | v15 | `0af21bc` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.37 | - | Non-source files no test reads select nothing; sqlglotc/ -> test_sqlglotc; test-file helpers -> importers of that file, not all tests |
 
-| v16 | `bd6fe7d` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.43 | - | Added/deleted files handled exactly (deleted module -> its importers and users; added module -> nothing; deleted test file -> its tests and importers; deleted fixture -> readers) instead of all tests; validated on 6 cases against the full suite |
+| v16 | `bd6fe7d` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.43 | **200.9** (unchanged: hidden commits have no added/deleted files we mishandled) | Added/deleted files handled exactly (deleted module -> its importers and users; added module -> nothing; deleted test file -> its tests and importers; deleted fixture -> readers) instead of all tests; validated on 6 cases against the full suite |
+| PROBE | `4688c9c` (branch probe-no-max-nodes) | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.33 | pending | **Unsafe probe, never the final.** v16 but test_max_nodes (28.8 s) never selected. Drop / ~29 s = hidden commits that pick it; each miss = one where it fails. |
 Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit sample.
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).
+
+## Final-entry safety
+
+The board enters our best score unless we pick another. **The probe must never be our
+final.** Safe final candidate right now: **v16 `bd6fe7d97c5e041718593f627092274f27f47522`**
+(board 200.9). If the probe scores lower than 200.9, select v16 (or a later safe version)
+as the final on the submission page.
+
+## Submission queue (one change per submission; re-ranked after every board result)
+
+Rules in force: no rule derived from mutation outcomes or from which tests an edit kind
+breaks; maps from the pinned commit only; 0 misses on every local check.
+
+| # | Candidate | Question it answers | Expected board saving | Risk |
+|---|---|---|---|---|
+| 1 | PROBE `4688c9c` (submitted) | How many hidden commits pick test_max_nodes, and does it ever fail there? | measurement only | unsafe by design; not a final |
+| 2 | v17: tests/helpers.py and tests/**/__init__.py select their importers (import graph) instead of all tests | Do hidden commits edit test helper/package files? | 0 if not; up to ~10 s per such commit | low (import graph, validated on test-file edits) |
+| 3 | v18: CPU trim back to v11 level (v12-v16 added ~0.1 s on the board with no saving there) | none (CPU only) | ~0.1 s | none |
+
+Not doing: a code-derived narrowing of test_max_nodes. It executes 2,432 lines (1,436 in
+parser.py, 282 of the tokenizer core's 526); a sound dynamic slice through the tokenizer and
+parser state would be about as large as coverage and cannot be built safely in the time left.

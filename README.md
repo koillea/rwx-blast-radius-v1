@@ -13,7 +13,7 @@
 5. Class- and module-level edits are narrowed where that's provably safe:
    - **An edit inside a `lambda` body** (for example an entry of a parser's `FUNCTIONS` table) runs the tests that called it.
    - **An UPPERCASE constant with a call-free value** (such as `WEEK_OFFSET`) runs the tests that executed a function reading that name; where that would add a slow test, only the tests that executed the reading statement itself. If any read happens at import time (class bodies, metaclasses), the whole file's tests run instead.
-   - **An edit confined to one `lambda` body** (checked by comparing the old and new syntax trees) runs only the tests that executed a line of that body.
+   - **An edit confined to one `lambda` body**, one-line lambdas included (checked by comparing the old and new syntax trees), runs only the tests that executed a line of that body, plus importers of any import that called it.
    - **An edit to an expression class's `arg_types`, `is_var_len_args`, `is_primitive` or `_hash_raw_args`** (attributes sqlglot reads only through an instance, or in `from_arg_list` just before instantiating) runs the tests that created that class or a subclass (every read in sqlglot goes through an instance), the code that spells out `C.arg_types`/`C.required_args`, and tests that name the class. A copy made while another expression class is defined (`TryCast` copying `Cast`'s) adds that class's observers.
 6. **Docstring, comment and layout edits:** if the patched file has the same syntax tree as the pinned one once every bare string statement is blanked (docstrings, and the attribute docstrings after assignments, which the compiler discards), nothing runs. No collected test reads a docstring. The exception is `tests/test_typing.py`, which compares annotator code objects, so it always runs for edits under `sqlglot/typing/`.
 7. **Comparison swaps:** an edit whose only effect is to swap one comparison for its partner (`is`↔`==`, `is not`↔`!=`, `<`↔`<=`, `>`↔`>=`) can change behaviour only where the two operators disagree on the operands actually seen. A second build pass (`build/cmpprobe.py`) evaluates both operators at every such comparison in sqlglot and records the tests in which they ever disagreed (`maps/cmp.json`). Only those tests run. If they disagreed while sqlglot was being imported, the normal rules apply.
@@ -47,3 +47,4 @@ The suite's process pools run in-process during the build, with every task pickl
 | v11 (same picks as v10, ~43% less CPU) | 119.652 | 0 |
 | v12 (attribute docstrings; more instance-read attributes) | 119.652 | 0 |
 | v13 (constant readers narrowed to the reading statement) | 119.652 | 0 |
+| v14 (one-line lambdas, e.g. generator TRANSFORMS) | 119.652 | 0 |

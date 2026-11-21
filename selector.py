@@ -384,6 +384,7 @@ class Selector:
         self.imp_importers = _LazyList(m.get("imp_importers", []), S)
         self.imp_line_mods = {f: {int(k): v for k, v in d.items()} for f, d in m.get("imp_line_mods", {}).items()}
         self.touched = m.get("touched", {})
+        self.imp_mods = m.get("imp_mods", [])
         self._trees: dict[str, object] = {}
         self._all_src: list[tuple[str, list[str]]] | None = None
         self._lines = None
@@ -484,8 +485,8 @@ class Selector:
 
         if any(not (lam.body.lineno <= l <= lam.body.end_lineno) for l in ch.lines):
             return False
-        if any(first <= lam.lineno for first, _r, _a in ch.blocks):
-            return False  # the lambda itself must sit before every change
+        # the lambda is matched by position in both trees below; if the edit moved it,
+        # it is not found and this returns False
         src = pinned_source(f)
         try:
             old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
@@ -640,10 +641,19 @@ class Selector:
         if body is not None and self._lambda_confined(f, ch, body):
             cl = self.cls_lines.get(f, {})
             sel = set()
+            active = {y for v in self.touched.values() for y in v}  # imports that run sqlglot code
+            mod = f[:-3].replace("/", ".")
+            mod = mod[: -len(".__init__")] if mod.endswith(".__init__") else mod
+            own = mod in {self.imp_mods[y] for y in active}
             for l in range(body.body.lineno, body.body.end_lineno + 1):
                 sel |= set(cl.get(l, ()))
-                if l != body.lineno:  # the `lambda` line itself also runs when it is defined
+                if l != body.lineno or own:
                     sel |= self.imp_tests(f, l)
+                else:
+                    # the `lambda` line also runs when the lambda is defined (its own
+                    # module's import); a call during an import can only come from an
+                    # import that runs sqlglot code
+                    sel |= self.imp_tests(f, l, active)
             log(f"  {f}:{line} confined to lambda body -> {len(sel)}")
             return sel
         # ---- simple constant assignment

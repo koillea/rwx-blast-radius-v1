@@ -719,6 +719,20 @@ class Selector:
             return set(self.fixture_dirs[d])
         return None
 
+    def maybe_doc_only(self, ch: FileChange) -> bool:
+        """Cheap pre-check for same_code: every removed line is blank, a comment, or
+        inside a docstring of the pinned file, and every added line is blank, a comment,
+        or could be docstring text (the full syntax-tree check decides)."""
+        for first, removed, added in ch.blocks:
+            for k, text in enumerate(removed):
+                if not _is_comment_or_blank(text) and not self._in_docstring(ch.old, first + k):
+                    return False
+            if not removed:  # pure insertion: it must land inside a docstring or be a comment
+                if not all(_is_comment_or_blank(x) for x in added) and not (
+                        self._in_docstring(ch.old, first - 1) and self._in_docstring(ch.old, first)):
+                    return False
+        return True
+
     def comparison_swap(self, ch: FileChange):
         """An edit whose only effect is to swap one comparison for its partner (is <-> ==,
         is not <-> !=, < <-> <=, > <-> >=) changes behaviour only where the two give
@@ -732,14 +746,42 @@ class Selector:
             self._cmp = json.loads(p.read_text()) if p.exists() else {"files": [], "diff": {}}
             self._cmp["files"] = set(self._cmp["files"])
         f = ch.old
-        if f not in self._cmp["files"]:
+        if f not in self._cmp["files"] or len(ch.blocks) != 1:
             return None
+        _first, removed, added = ch.blocks[0]
+        if len(removed) != 1 or len(added) != 1:
+            return None
+        strip = lambda x: re.sub(r"\s*(?:\bis\s+not\b|\bis\b|==|!=|<=|>=|<|>)\s*", " ", x)
+        if strip(removed[0]) != strip(added[0]):
+            return None  # the line differs in more than a comparison operator
         src = pinned_source(f)
         if src is None:
             return None
         try:
             old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
         except SyntaxError:
+            return None
+        # The two files differ only in operator characters on one line (checked above),
+        # so their brackets, strings and statement boundaries are the same: comparing
+        # the statement that holds that line is enough.
+        line = _first
+
+        def stmt_at(tree):
+            node, best = tree, None
+            while True:
+                nxt = None
+                for c in ast.iter_child_nodes(node):
+                    if getattr(c, "lineno", None) is not None and c.lineno <= line <= c.end_lineno:
+                        nxt = c
+                        break
+                if nxt is None:
+                    return best
+                if isinstance(nxt, ast.stmt):
+                    best = nxt
+                node = nxt
+
+        old_t, new_t = stmt_at(old_t), stmt_at(new_t)
+        if old_t is None or new_t is None or (old_t.lineno, old_t.end_lineno) != (new_t.lineno, new_t.end_lineno):
             return None
         a_nodes, b_nodes = list(ast.walk(old_t)), list(ast.walk(new_t))
         if len(a_nodes) != len(b_nodes):
@@ -787,7 +829,7 @@ class Selector:
                 r = None
             elif path.startswith("sqlglot/") and path.endswith(".py") and (sw := self.comparison_swap(ch)) is not None:
                 r = sw
-            elif path.startswith("sqlglot/") and path.endswith(".py") and same_code(ch):
+            elif path.startswith("sqlglot/") and path.endswith(".py") and self.maybe_doc_only(ch) and same_code(ch):
                 log(f"  {path}: same AST apart from docstrings -> nothing")
                 continue
             elif path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):

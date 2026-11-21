@@ -275,7 +275,10 @@ maps["touched"] = {k: sorted(_mi[y] for y in v) for k, v in touched.items()}
 maps["sets"] = [list(t) for t in _SETS]
 import zlib as _z
 
-open(os.path.join(OUT, "maps.json.z"), "wb").write(_z.compress(json.dumps(maps, separators=(",", ":")).encode(), 9))
+import marshal as _m
+
+# marshal (format 4, read by any Python 3.8+) loads several times faster than JSON
+open(os.path.join(OUT, "maps.bin.z"), "wb").write(_z.compress(_m.dumps(maps, 4), 9))
 
 # for build_cmp.py only (not shipped): tests behind every "I|module" context
 json.dump({m: sorted(importers(m)) for m in set(MODFILE) | set(EDGES)},
@@ -288,10 +291,12 @@ sets: dict[frozenset, int] = {}
 lines_out = {}
 for f, d in body_line_tests.items():
     lines_out[f] = {str(l): sets.setdefault(frozenset(v), len(sets)) for l, v in d.items()}
-blob = json.dumps({"sets": [sorted(x) for x in sets], "lines": lines_out}, separators=(",", ":")).encode()
-open(os.path.join(OUT, "lines.json.z"), "wb").write(zlib.compress(blob, 9))
+import marshal
+
+blob = marshal.dumps({"sets": [sorted(x) for x in sets], "lines": {f: {int(k): v for k, v in d.items()} for f, d in lines_out.items()}}, 4)
+open(os.path.join(OUT, "lines.bin.z"), "wb").write(zlib.compress(blob, 9))
 print("line map: lines", sum(len(v) for v in lines_out.values()), "sets", len(sets),
-      "bytes", os.path.getsize(os.path.join(OUT, "lines.json.z")))
+      "bytes", os.path.getsize(os.path.join(OUT, "lines.bin.z")))
 print("units", len(unit_tests), "import-time units", len(unit_import),
       "files", len(maps["file_cov"]), "fixtures", len(maps["fixtures"]),
-      "bytes", os.path.getsize(os.path.join(OUT, "maps.json.z")), "distinct sets", len(_SETS))
+      "bytes", os.path.getsize(os.path.join(OUT, "maps.bin.z")), "distinct sets", len(_SETS))

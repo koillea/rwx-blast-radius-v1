@@ -26,7 +26,7 @@
 10. Fixture edits run the tests that opened that fixture. Test-method edits run that test. Anything the maps cannot vouch for (new or deleted files, test helpers, unknown files) runs every test, because a run-all (~37 s) is far cheaper than a miss (300 s).
 11. Split the chosen tests longest-first over the worker count (1–8) that minimises busiest-worker time + 2 s per worker.
 
-**The maps** (`build/`) are built once from sqlglot at the pinned commit `eb11aec`, and committed. They hold:
+**The maps** (`build/`, stored as zlib-compressed `marshal` with each distinct test set kept once and built only when used) are built once from sqlglot at the pinned commit `eb11aec`, and committed. They hold:
 - per-test coverage, recorded with each test's own coverage context;
 - the sqlglot classes each test instantiates, with their bases;
 - the fixture files each test opens.
@@ -44,3 +44,4 @@ The suite's process pools run in-process during the build, with every task pickl
 | v8 (same picks as v7, less CPU) | 126.699 | 0 |
 | v9 (`arg_types` reads) | 119.652 | 0 |
 | v10 (import exposure: closes a miss v3–v9 shared) | 119.652 | 0 |
+| v11 (same picks as v10, ~43% less CPU) | 119.652 | 0 |

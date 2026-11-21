@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY selector.py /app/selector.py
-COPY maps/maps.json.z maps/lines.json.z maps/cmp.json maps/pinned_src.zip /app/maps/
+COPY maps/maps.bin.z maps/lines.bin.z maps/cmp.json maps/pinned_src.zip /app/maps/
 RUN python -m py_compile /app/selector.py
 
 CMD ["python3", "-S", "/app/selector.py"]

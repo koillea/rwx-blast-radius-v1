@@ -22,7 +22,7 @@ from bisect import bisect_right
 from pathlib import Path
 
 DATA = Path(os.environ.get("DATA_DIR", "/data"))
-MAPS = Path(__file__).resolve().parent / "maps" / "maps.json.z"
+MAPS = Path(__file__).resolve().parent / "maps" / "maps.bin.z"
 MAX_WORKERS = 8
 WORKER_MS = 2000
 VERBOSE = os.environ.get("BR_VERBOSE") == "1"
@@ -288,12 +288,71 @@ def split(nums, dur):
 DOC_EXT = (".md", ".rst", ".txt", ".png", ".svg", ".html")
 
 
+class _Sets:
+    """The maps' distinct test sets, turned into frozensets only when first used."""
+
+    def __init__(self, raw):
+        self.raw, self.done = raw, {}
+
+    def __getitem__(self, i):
+        v = self.done.get(i)
+        if v is None:
+            v = self.done[i] = frozenset(self.raw[i])
+        return v
+
+
+class _Lazy(dict):
+    """key -> set index, read as key -> frozenset."""
+
+    def __init__(self, d, sets):
+        super().__init__(d)
+        self._s = sets
+
+    def __getitem__(self, k):
+        return self._s[dict.__getitem__(self, k)]
+
+    def get(self, k, default=None):
+        return self._s[dict.__getitem__(self, k)] if dict.__contains__(self, k) else default
+
+    def items(self):
+        return ((k, self._s[v]) for k, v in dict.items(self))
+
+    def values(self):
+        return (self._s[v] for v in dict.values(self))
+
+
+class _LazyUnits(dict):
+    def __init__(self, d, sets):
+        super().__init__(d)
+        self._s = sets
+
+    def get(self, k, default=None):
+        if not dict.__contains__(self, k):
+            return default
+        i, imp = dict.__getitem__(self, k)
+        return self._s[i], bool(imp)
+
+    __getitem__ = lambda self, k: self.get(k)
+
+
+class _LazyList:
+    def __init__(self, raw, sets):
+        self.raw, self._s = raw, sets
+
+    def __getitem__(self, i):
+        return self._s[self.raw[i]]
+
+    def __len__(self):
+        return len(self.raw)
+
+
 class Selector:
     def __init__(self, tests):
+        import marshal
         import zlib
 
-        m = json.loads(zlib.decompress(MAPS.read_bytes()))
-        S = [frozenset(x) for x in m["sets"]]  # each distinct test set, stored once
+        m = marshal.loads(zlib.decompress(MAPS.read_bytes()))
+        S = _Sets(m["sets"])  # each distinct test set, stored once, built on first use
         self._cmp = None
         self.all = {t["number"] for t in tests}
         self.ids = {t["id"]: t["number"] for t in tests}
@@ -302,19 +361,19 @@ class Selector:
         for t in tests:
             self.by_file.setdefault(t["file"], set()).add(t["number"])
             self.by_class.setdefault(t["id"].rsplit("::", 1)[0], set()).add(t["number"])
-        self.file_cov = {f: S[i] for f, i in m["file_cov"].items()}
-        self.file_use = {f: S[i] for f, i in m["file_use"].items()}
-        self.fixtures = {f: S[i] for f, i in m["fixtures"].items()}
+        self.file_cov = _Lazy(m["file_cov"], S)
+        self.file_use = _Lazy(m["file_use"], S)
+        self.fixtures = _Lazy(m["fixtures"], S)
         self.spans = {f: sorted(v) for f, v in m["spans"].items()}
-        self.units = {(f, s, e): (S[ts], bool(imp)) for f, s, e, ts, imp in m["units"]}
+        self.units = _LazyUnits({(f, s, e): (ts, imp) for f, s, e, ts, imp in m["units"]}, S)
         self.test_spans = m["test_spans"]
-        self.cls_lines = {f: {int(k): S[v] for k, v in d.items()} for f, d in m.get("cls_lines", {}).items()}
+        self.cls_lines = {f: _Lazy({int(k): v for k, v in d.items()}, S) for f, d in m.get("cls_lines", {}).items()}
         self.docstrings = m.get("docstrings", {})
-        self.class_use = {k: S[i] for k, i in m.get("class_use", {}).items()}
+        self.class_use = _Lazy(m.get("class_use", {}), S)
         # import-time data: which module imports ran each line, which imports used or
         # defined each class, and each imported module's importers (tests that fail
         # if importing it fails)
-        self.imp_importers = [S[i] for i in m.get("imp_importers", [])]
+        self.imp_importers = _LazyList(m.get("imp_importers", []), S)
         self.imp_line_mods = {f: {int(k): v for k, v in d.items()} for f, d in m.get("imp_line_mods", {}).items()}
         self.touched = m.get("touched", {})
         self._trees: dict[str, object] = {}
@@ -351,9 +410,14 @@ class Selector:
             out = []
             for name in _zip.namelist():
                 if name.endswith(".py"):
-                    out.append((name, _zip.read(name).decode("utf-8", "replace").split("\n")))
+                    text = _zip.read(name).decode("utf-8", "replace")
+                    out.append((name, text.split("\n"), text))
             self._all_src = out
         return self._all_src
+
+    def _sources_with(self, needle):
+        """(file, lines) of the sources whose text contains `needle` at all."""
+        return [(g, gl) for g, gl, text in self._sources() if needle in text]
 
     def _in_docstring(self, f, line):
         return any(a <= line <= b for a, b in self.docstrings.get(f, ()))
@@ -435,7 +499,7 @@ class Selector:
         sel = set(self.class_use.get(f"{f}::{cname}", ()))
         word = re.compile(r"\b" + re.escape(cname) + r"\b")
         attr = re.compile(r"\b" + re.escape(cname) + r"\s*\.\s*(?:arg_types|required_args)\b")
-        for g, glines in self._sources():
+        for g, glines in self._sources_with(cname):
             for i, text in enumerate(glines, 1):
                 if cname not in text or not word.search(text):
                     continue
@@ -488,9 +552,25 @@ class Selector:
         if tree is None:
             return None
         changed = {l for l in ch.lines}
+        # only the statement that holds the line can contain a lambda around it
+        holder = None
+        node = tree
+        while True:
+            nxt = None
+            for c in getattr(node, "body", ()):
+                if c.lineno <= line <= c.end_lineno:
+                    nxt = c
+                    break
+            if nxt is None:
+                break
+            holder = nxt
+            if not isinstance(nxt, ast.ClassDef):
+                break
+            node = nxt
+        local = list(ast.walk(holder)) if holder is not None else []
         # ---- lambda bodies
         lam = None
-        for node in ast.walk(tree):
+        for node in local:
             if isinstance(node, ast.Lambda):
                 b = node.body
                 if b.lineno < line < b.end_lineno or (b.lineno <= line <= b.end_lineno and b.lineno != b.end_lineno and line not in (b.lineno, b.end_lineno)):
@@ -502,7 +582,7 @@ class Selector:
         # an edit whose every change lies inside one lambda body (checked on the ASTs)
         # is seen only by calls of that lambda; each call runs a line of the body
         body = None
-        for node in ast.walk(tree):
+        for node in local:
             if isinstance(node, ast.Lambda) and node.body.lineno <= line <= node.body.end_lineno:
                 if body is None or (node.body.end_lineno - node.body.lineno) < (body.body.end_lineno - body.body.lineno):
                     body = node
@@ -557,7 +637,7 @@ class Selector:
         for name in names:
             word = re.compile(r"\b" + re.escape(name) + r"\b")
             define = re.compile(r"^\s*" + re.escape(name) + r"\s*(:[^=]|=(?!=))")
-            for g, glines in self._sources():
+            for g, glines in self._sources_with(name):
                 for i, text in enumerate(glines, 1):
                     if name not in text or not word.search(text):
                         continue
@@ -599,11 +679,12 @@ class Selector:
         if self._lines is None:
             import zlib
 
-            p = MAPS.parent / "lines.json.z"
+            import marshal
+
+            p = MAPS.parent / "lines.bin.z"
             try:
-                d = json.loads(zlib.decompress(p.read_bytes()))
-                sets = d["sets"]
-                self._lines = {f: {int(k): sets[v] for k, v in m.items()} for f, m in d["lines"].items()}
+                d = marshal.loads(zlib.decompress(p.read_bytes()))
+                self._lines = {f: _Lazy(m, d["sets"]) for f, m in d["lines"].items()}
             except OSError:
                 self._lines = {}
         return self._lines
@@ -717,10 +798,15 @@ class Selector:
         import ast
 
         src = pinned_source(f)
+        old_t = self._tree(f)
         try:
-            old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
+            new_t = ast.parse(patched_source(src, ch))
         except (SyntaxError, TypeError):
             return None
+        if old_t is None:
+            return None
+        lo = min(b[0] for b in ch.blocks) - 1
+        hi = max(b[0] + max(len(b[1]), 1) for b in ch.blocks)
 
         def flat(tree):
             out = []
@@ -742,6 +828,8 @@ class Selector:
                 return None
             if isinstance(x, ast.ClassDef):
                 continue  # its body statements are compared on their own
+            if x.end_lineno < lo or x.lineno > hi:
+                continue  # the patch leaves text outside its blocks unchanged
             if ast.dump(x) != ast.dump(y):
                 if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue  # function edits are handled per statement elsewhere
@@ -879,7 +967,7 @@ class Selector:
             cword = re.compile(r"\b" + re.escape(path[-1]) + r"\b") if path else None
             for name in names:
                 word = re.compile(r"\b" + re.escape(name) + r"\b")
-                for g, glines in self._sources():
+                for g, glines in self._sources_with(name):
                     gl = self.imp_line_mods.get(g)
                     if not gl:
                         continue
@@ -973,15 +1061,21 @@ class Selector:
         """Cheap pre-check for same_code: every removed line is blank, a comment, or
         inside a docstring of the pinned file, and every added line is blank, a comment,
         or could be docstring text (the full syntax-tree check decides)."""
+        touches_doc = False
         for first, removed, added in ch.blocks:
             for k, text in enumerate(removed):
-                if not _is_comment_or_blank(text) and not self._in_docstring(ch.old, first + k):
+                if self._in_docstring(ch.old, first + k):
+                    touches_doc = True
+                elif not _is_comment_or_blank(text):
                     return False
+            if not removed and self._in_docstring(ch.old, first - 1) and self._in_docstring(ch.old, first):
+                touches_doc = True
             if not removed:  # pure insertion: it must land inside a docstring or be a comment
                 if not all(_is_comment_or_blank(x) for x in added) and not (
                         self._in_docstring(ch.old, first - 1) and self._in_docstring(ch.old, first)):
                     return False
-        return True
+        # comment/blank-only edits are proved harmless more cheaply by significant_lines
+        return touches_doc
 
     def comparison_swap(self, ch: FileChange):
         """An edit whose only effect is to swap one comparison for its partner (is <-> ==,
@@ -991,12 +1085,8 @@ class Selector:
         kind of edit, or the comparison also ran at import time."""
         import ast
 
-        if self._cmp is None:
-            p = MAPS.parent / "cmp.json"
-            self._cmp = json.loads(p.read_text()) if p.exists() else {"files": [], "diff": {}}
-            self._cmp["files"] = set(self._cmp["files"])
         f = ch.old
-        if f not in self._cmp["files"] or len(ch.blocks) != 1:
+        if len(ch.blocks) != 1:
             return None
         _first, removed, added = ch.blocks[0]
         if len(removed) != 1 or len(added) != 1:
@@ -1004,17 +1094,61 @@ class Selector:
         strip = lambda x: re.sub(r"\s*(?:\bis\s+not\b|\bis\b|==|!=|<=|>=|<|>)\s*", " ", x)
         if strip(removed[0]) != strip(added[0]):
             return None  # the line differs in more than a comparison operator
+        if self._cmp is None:  # loaded only when an edit could be a comparison swap
+            p = MAPS.parent / "cmp.json"
+            self._cmp = json.loads(p.read_text()) if p.exists() else {"files": [], "diff": {}}
+            self._cmp["files"] = set(self._cmp["files"])
+        if f not in self._cmp["files"]:
+            return None
         src = pinned_source(f)
         if src is None:
             return None
-        try:
-            old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
-        except SyntaxError:
-            return None
         # The two files differ only in operator characters on one line (checked above),
         # so their brackets, strings and statement boundaries are the same: comparing
-        # the statement that holds that line is enough.
+        # the statement that holds that line is enough. Parse just that statement's old
+        # and new text (falling back to whole files if it does not parse on its own).
         line = _first
+        shift = 0
+        old_t = self._tree(f)
+        new_t = None
+        if old_t is not None:
+            holder = None
+            node = old_t
+            while True:
+                nxt = None
+                for c in ast.iter_child_nodes(node):
+                    if getattr(c, "lineno", None) is not None and c.lineno <= line <= c.end_lineno:
+                        nxt = c
+                        break
+                if nxt is None:
+                    break
+                if isinstance(nxt, ast.stmt):
+                    holder = nxt
+                node = nxt
+            if holder is not None:
+                lines = src.split("\n")
+                l0, l1 = holder.lineno, holder.end_lineno
+                old_txt = lines[l0 - 1:l1]
+                new_txt = list(old_txt)
+                new_txt[line - l0] = added[0]
+                wrap = old_txt[0][:1] in (" ", "\t")
+                pre = ["if 1:"] if wrap else []
+                try:
+                    o, n = ast.parse("\n".join(pre + old_txt)), ast.parse("\n".join(pre + new_txt))
+                    o, n = (o.body[0].body if wrap else o.body), (n.body[0].body if wrap else n.body)
+                    if len(o) == 1 and len(n) == 1:
+                        old_t, new_t = o[0], n[0]
+                        shift = l0 - 1 - len(pre)
+                        line = line - shift
+                except SyntaxError:
+                    pass
+        if new_t is None:
+            try:
+                old_t, new_t = ast.parse(src), ast.parse(patched_source(src, ch))
+            except SyntaxError:
+                return None
+            line, shift = _first, 0
+        snippet = not isinstance(old_t, ast.Module)
 
         def stmt_at(tree):
             node, best = tree, None
@@ -1030,7 +1164,8 @@ class Selector:
                     best = nxt
                 node = nxt
 
-        old_t, new_t = stmt_at(old_t), stmt_at(new_t)
+        if not snippet:
+            old_t, new_t = stmt_at(old_t), stmt_at(new_t)
         if old_t is None or new_t is None or (old_t.lineno, old_t.end_lineno) != (new_t.lineno, new_t.end_lineno):
             return None
         a_nodes, b_nodes = list(ast.walk(old_t)), list(ast.walk(new_t))
@@ -1052,14 +1187,14 @@ class Selector:
         b.ops = a.ops
         if ast.dump(old_t) != ast.dump(new_t):
             return None  # something else changed too
-        key = f"{f}:{a.lineno}:{a.col_offset}:{partner[type(a.ops[0])][1]}"
+        key = f"{f}:{a.lineno + shift}:{a.col_offset}:{partner[type(a.ops[0])][1]}"
         if key not in self._cmp["diff"]:
-            log(f"  {f}:{a.lineno} comparison swap never differs -> nothing")
+            log(f"  {f}:{a.lineno + shift} comparison swap never differs -> nothing")
             return set()
         tests = self._cmp["diff"][key]
         if tests is None:
             return None
-        log(f"  {f}:{a.lineno} comparison swap differs in {len(tests)} tests")
+        log(f"  {f}:{a.lineno + shift} comparison swap differs in {len(tests)} tests")
         return set(tests)
 
     def select(self, changes: list[FileChange]) -> set[int]:

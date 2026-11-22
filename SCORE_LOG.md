@@ -36,6 +36,28 @@ Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7
 | v20 | `9b60ad1` (branch v20-flag-rule) | 105.4 | 105.4 | - | - | 0 | 0.40 | **198.2** (first move since v11: about 1 small class-constant edit in the hidden set; benchmark predicted -44 s) | Class-constant edits select only tests that read that class's definition (flag probe). Benchmark 191.9 -> 147.8 s. 125-edit flag validation in progress; not the final until clean |
 | v19.1 | `19b0e04` | 106.1 | 105.6 | - | - | 0 | 0.4 | - | v19 + dict map fix: a dict read while module Y is imported now counts for Y's importers AND Y's users (tests reaching Y through the dialect registry without importing it). Only adds tests to v19's selections (strictly safer); found via 2 flag-rule misses (K14140, K14143) with the same cause. 0 misses on all 175 dict edits |
 | v21 | `a32df5b` (branch v20-flag-rule) | 105.8 | 105.4 | - | - | 0 | 0.45 | **198.3** (BB-37695FD0) | v20 + import-time reads count for the module's users (fixes v20's 4 flag misses: settings turned into derived tables at class definition, used by tests that reach the dialect through the registry). **Validated: 136 fresh flag edits (66 + 70), 0 misses**; also 0 misses on all 175 dict edits, 125 comparison swaps, kit and benchmark (147.8 s). **Final entry (picked)** |
+| PROBE B | `a45f767` (branch probe-noslow) | - | - | - | - | - | - | **428.7** (BB-3475D44E) | **Unsafe probe, never the final.** v18 but no test over 5 s ever selected. Reading: 428.7 = 1 miss (300 s) + about 128.7 s, so the slow tests that pass cost about 72 s across the 40 hidden commits, and exactly one hidden commit has a slow test failing |
+| PROBE C | `6d370d9` (branch probe-no-tpcds) | - | - | - | - | - | - | not submitted | **Unsafe probe, never the final.** v21 but test_execute_tpcds never selected. Not needed after v22's result |
+| v22 | `70adc41` (branch v22-tpcds-check) | 105.4 | 105.4 | - | - | 0 | 3.2 (check ran once) | **197.59 simulated + 0.71 CPU, 0 misses: identical to v21** | v21 + TPC-DS runtime check: when every edited line is in a function the TPC-DS execution never runs, re-run the test's parse/optimize/plan/transpile on the patched sources (pinned sqlglot copy in the image, 3.4 s CPU, capped at 20 s CPU and 1 GB) and drop test_execute_tpcds if all 99 query fingerprints match. Run only when dropping the test would shorten the commit by at least 8 s. Benchmark 147.8 -> 119.7 s (0 misses). Board CPU did not rise, so the check never ran on the hidden set: test_execute_tpcds is not where the ~72 s of slow passing tests goes (test_max_nodes, likely with test_generator_memory, is). Validation stopped at 85 of 126 edits (0 misses); not the final |
+
+## Final summary
+
+**Final entry: v21 `a32df5bcd1ee279cc56379b97c744d5af6f738e1` (branch v20-flag-rule, BB-37695FD0): board 198.3, 0 misses.**
+Validated before it was picked: 136 fresh class-constant edits, 175 dict edits, 125 comparison
+swaps, the kit sample and the 40-commit benchmark, all with 0 misses against full test runs.
+
+- Starter baseline (all tests, 3 workers): 1614.1. v3 257.0 -> v7 208.3 -> v11 200.8 -> v20 198.2 -> v21 198.3.
+- Every rule selects tests from facts measured on the pinned commit (coverage, import contexts,
+  comparison / dict-read / class-constant probes). Nothing is derived from which tests a patch breaks.
+- Where the remaining time goes: probe B (no test over 5 s selected) scored 428.7 = 1 miss + about
+  128.7 s, so slow tests that pass cost about 72 s across the 40 hidden commits. v22 showed
+  test_execute_tpcds is not that cost; it is test_max_nodes (28.8 s), likely with test_generator_memory
+  (6.7 s). Neither has a sound cheap check: test_max_nodes is all parsing of one huge query (the code
+  such patches change), and test_generator_memory would cost as much to check as to run.
+- Probes (`4688c9c`, `01cabc2`, `a45f767`, `6d370d9`) are unsafe by design and were never the final.
+
+All submitted commits and branches (main, v20-flag-rule, v22-tpcds-check, probe-no-max-nodes,
+probe-empty, probe-noslow, probe-no-tpcds) stay in the repo until results are published.
 
 ## Final-entry safety
 

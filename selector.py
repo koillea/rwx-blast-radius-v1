@@ -306,6 +306,9 @@ NO_EFFECT_DIRS = ("benchmarks/",)
 INSTANCE_READ_ATTRS = ("arg_types", "is_var_len_args", "is_primitive", "_hash_raw_args")
 
 
+TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+
 class _Exact(set):
     """A selection from probe records that already include import-time readers: it must
     not be intersected with the file's runtime users."""
@@ -1626,6 +1629,54 @@ class Selector:
         log(f"  {f}:{a.lineno + shift} comparison swap differs in {len(tests)} tests")
         return set(tests)
 
+    # ------------------------------------------------------------ tpcds runtime check
+    def tpcds_unaffected(self, changes) -> bool:
+        """test_execute_tpcds runs each TPC-DS query through parse -> optimize -> Plan ->
+        Python executor and compares with DuckDB on transpile(sql, "duckdb"). If the patch
+        only changes function bodies that the execution side never runs on the pinned
+        commit (maps/tpcds/exec.json), and re-running parse/optimize/Plan/transpile with
+        the patch gives the same fingerprints as the pinned commit (tpcds_check.py), the
+        test's inputs and code are unchanged, so its outcome is too."""
+        import subprocess
+
+        here = Path(__file__).resolve().parent
+        try:
+            exec_lines = json.loads((MAPS.parent / "tpcds" / "exec.json").read_text())
+        except OSError:
+            return False
+        files = {}
+        for ch in changes:
+            path = ch.new if ch.added else ch.old
+            if path.endswith(DOC_EXT) or path.startswith(("docs/", "posts/", "pdoc/", ".github/")):
+                continue
+            if ch.added or ch.deleted or not (path.startswith("sqlglot/") and path.endswith(".py")):
+                return False
+            sig = significant_lines(ch)
+            if sig is None:
+                return False
+            el = set(exec_lines.get(path, ()))
+            for line in sig:
+                u = self._unit_for(path, line)
+                if u is None or line < u[2]:
+                    return False  # module/class level or a function header
+                if any(u[2] <= x <= u[1] for x in el):
+                    return False  # the execution side runs this function
+            src = pinned_source(path)
+            if src is None:
+                return False
+            files[path] = patched_source(src, ch)
+        if not files:
+            return False
+        try:
+            r = subprocess.run([sys.executable, "-S", str(here / "tpcds_check.py"), "run"], input=json.dumps({"files": files}),
+                               capture_output=True, text=True, timeout=30, preexec_fn=_check_limits,
+                               env={**os.environ, "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"})
+            out = json.loads(r.stdout)
+        except Exception:  # noqa: BLE001
+            return False
+        log(f"  tpcds check: same={out.get('same')} differ={out.get('differ')}")
+        return out.get("same") is True
+
     def select(self, changes: list[FileChange]) -> set[int]:
         sel: set[int] = set()
         for ch in changes:
@@ -1669,6 +1720,22 @@ class Selector:
         return sel
 
 
+CHECK_MIN_GAIN_MS = 8000
+
+
+def _run_cost(chosen: set[int], dur: dict[int, int]) -> int:
+    workers = split(sorted(chosen), dur)
+    return max((sum(dur.get(t, 0) for t in w) for w in workers), default=0) + 2000 * len(workers)
+
+
+def _check_limits() -> None:
+    """Caps for the TPC-DS check child: a patch that loops or allocates without end must
+    not cost the board more than a few seconds or take the container's memory."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
+    resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+
+
 def main():
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
     dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
@@ -1676,7 +1743,14 @@ def main():
     out = []
     for p in sorted((DATA / "commits").glob("*.patch")):
         log(p.stem)
-        chosen = sel.select(parse_patch(p.read_text(encoding="utf-8", errors="replace")))
+        changes = parse_patch(p.read_text(encoding="utf-8", errors="replace"))
+        chosen = sel.select(changes)
+        tp = sel.ids.get(TPCDS_ID)
+        # The check costs a few CPU seconds, so run it only when dropping the test would
+        # shorten the run by more than that (not when a slower test sets the busiest worker).
+        if tp in chosen and _run_cost(chosen, dur) - _run_cost(chosen - {tp}, dur) >= CHECK_MIN_GAIN_MS \
+                and sel.tpcds_unaffected(changes):
+            chosen.discard(tp)
         out.append(json.dumps({"commit": p.stem, "workers": split(sorted(chosen), dur)}))
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
 

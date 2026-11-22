@@ -32,6 +32,29 @@ Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7
 | v18 | `9b9fcfc` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | Dict-entry value edits select only tests that read the changed keys' values (dict-read probe on the pinned commit). Validated on 25 + 25 fresh dict edits (0 misses; first run found and fixed an enum-key matching bug), then **125 fresh dict edits (46 with real failures): 0 misses**, 1,185.5 s vs v17's 1,455.4 s. Final candidate. |
 | v19 | `f206657` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | v18 + comparison-probe fix: a swap whose partner operator re-enters the same comparison (e.g. inside `__eq__`) counts as differing. Found by a 125-swap validation (1 real miss, V11224); same scores, closes a gap present since v7. Validation of the fix: in progress |
 
+## v25: fixture check at decision time (branch v25-fixture-check)
+
+For commits that only edit SQL fixtures read through tests/helpers.py's loaders, the selector runs
+each reading test's own method on the pinned sqlglot, over the new or changed fixture entries only;
+if every method passes it selects nothing, otherwise it keeps v21's selection (see README rule 11).
+Real test runs only; nothing is derived from which tests patches break.
+
+Validation (real pytest runs on the patched pinned checkout as labels; crash/timeout = all fail):
+- 160 fresh generated fixture edits (setF): v25 selects nothing on 65, each labelled with a full-suite
+  run (all tests except tests/test_sqlglotc.py, which errors at the pinned commit too): **0 misses**.
+  Of the 95 kept: 90 really fail their reader, 5 pass (conservative fallbacks: tpc-h.sql also read by
+  executor tests; test_eliminate_joins also uses duckdb). Simulated 555.5 (v21) -> 401.7 (v25).
+- bench40: **0 misses**. Its fixture labels were wrong (all "0 failing"); real runs show 10 of its 12
+  fixture commits break their reader. v25 drops only B41005 (really passes): 147.79 -> 145.78.
+  Non-fixture commits: output byte-identical to v21.
+- Kit sample: not available in this container (not run).
+- CPU: bench40 0.81 s vs v21 ~0.44 s locally (read-only, uid 65534, precompiled). Per check: median
+  0.002 s, max 0.43 s; first check includes the ~0.35 s import.
+
+Board estimate (estimate, not a score): fixture commits ~29% x 40 ~= 11.6; saving ~= 11.6 x p x 2.6 s
+- ~0.8 s extra CPU, p = share of fixture edits that really pass. bench40-like p = 1/12: ~1.7 s;
+setF-like p = 0.43: ~12 s. v21 stays the final unless v25 scores lower on the board.
+
 ## Final-entry safety
 
 The board enters our best score unless we pick another. **The probe must never be our

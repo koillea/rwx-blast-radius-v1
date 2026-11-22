@@ -1669,6 +1669,63 @@ class Selector:
         return sel
 
 
+FIX_BUDGET = 1.0  # CPU seconds per commit for the fixture check; over it -> v21's selection
+FIX_TOTAL = 6.0  # CPU seconds for all fixture checks together
+
+
+def fixture_only_passes(sel, changes, chosen) -> bool:
+    """v25: a commit that only edits SQL fixtures read through tests/helpers.py's loaders.
+    Run the readers' own test methods on the pinned code over the new entries only; True
+    only if all of them pass. Anything unusual -> False (keep v21's selection)."""
+    global FIX_TOTAL
+    if not changes or FIX_TOTAL <= 0:
+        return False
+    edits = {}
+    for ch in changes:
+        if ch.added or ch.deleted or ch.old != ch.new or not ch.old.startswith("tests/fixtures/"):
+            return False
+        if not ch.old.endswith(".sql") or not ch.blocks:
+            return False
+        for _, removed, added in ch.blocks:
+            if any("\ufffd" in t for t in added):
+                return False  # not valid UTF-8 in the patch: the real read would fail
+        edits[ch.old[len("tests/fixtures/"):]] = ch
+    try:
+        import resource
+        import fixcheck
+    except Exception:  # noqa: BLE001
+        return False
+    ids = {n: i for i, n in sel.ids.items()}
+    readers = {ids.get(t) for t in chosen}
+    if None in readers or not readers <= set(fixcheck.METHODS):
+        return False
+    for rel, ch in edits.items():
+        if not set(sel.fixture(ch)) <= chosen:
+            return False
+    t0 = resource.getrusage(resource.RUSAGE_SELF)
+    try:
+        st = fixcheck._setup()
+        if not st:
+            return False
+        texts = {}
+        for rel, ch in edits.items():
+            pinned = st["fixtures"].get(rel)
+            if pinned is None:
+                return False
+            new = fixcheck.apply_blocks(pinned, ch.blocks)
+            if new is None:
+                return False
+            texts[rel] = fixcheck._universal(new)
+        ok = fixcheck.check(texts, readers, min(FIX_BUDGET, FIX_TOTAL))
+    except Exception:  # noqa: BLE001
+        ok = False
+    t1 = resource.getrusage(resource.RUSAGE_SELF)
+    used = (t1.ru_utime + t1.ru_stime) - (t0.ru_utime + t0.ru_stime)
+    FIX_TOTAL -= used
+    log(f"  fixture check {'passed' if ok else 'failed'} in {used:.3f}s CPU")
+    return ok
+
+
 def main():
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
     dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
@@ -1676,7 +1733,11 @@ def main():
     out = []
     for p in sorted((DATA / "commits").glob("*.patch")):
         log(p.stem)
-        chosen = sel.select(parse_patch(p.read_text(encoding="utf-8", errors="replace")))
+        changes = parse_patch(p.read_text(encoding="utf-8", errors="replace"))
+        chosen = sel.select(changes)
+        if chosen and fixture_only_passes(sel, changes, chosen):
+            log("  every new fixture entry passes its readers' own checks -> nothing")
+            chosen = set()
         out.append(json.dumps({"commit": p.stem, "workers": split(sorted(chosen), dur)}))
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
 

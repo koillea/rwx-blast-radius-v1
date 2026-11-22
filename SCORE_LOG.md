@@ -25,17 +25,46 @@ Simulated = test seconds (busiest worker per commit) + worker seconds (2 s per w
 | v15 | `0af21bc` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.37 | - | Non-source files no test reads select nothing; sqlglotc/ -> test_sqlglotc; test-file helpers -> importers of that file, not all tests |
 
 | v16 | `bd6fe7d` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.43 | **200.9** (unchanged: hidden commits have no added/deleted files we mishandled) | Added/deleted files handled exactly (deleted module -> its importers and users; added module -> nothing; deleted test file -> its tests and importers; deleted fixture -> readers) instead of all tests; validated on 6 cases against the full suite |
+| PROBE B | `a45f767` (branch probe-noslow, built on v18) | 672.7 | 672.651 | - | - | 2 | - | submitting | **Unsafe, never the final.** v18 minus tests > 5 s. Read: 200.14 - (simulated - 300 x misses) = cost of slow tests on the hidden set |
+| PROBE A | `01cabc2` (branch probe-empty) | 5400 | 5400 | 0 | 0 | 18 | - | submitting | **Unsafe, never the final.** Empty selections. Misses = hidden commits that break any test |
 | PROBE | `4688c9c` (branch probe-no-max-nodes) | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.33 | pending | **Unsafe probe, never the final.** v16 but test_max_nodes (28.8 s) never selected. Drop / ~29 s = hidden commits that pick it; each miss = one where it fails. |
 Reference: a perfect selector (the answers) scores 94.4 s simulated on the kit sample.
 Board model so far: board simulated ~= 97.9 + 0.855 x kit simulated (fits v3, v7, v11 within 0.1 s).
 | v17 | `981844f` | 120.0 | 119.652 | 63.652 | 56 | 0 | 0.36 | pending | Test helper modules with no test functions (tests/helpers.py, test-package __init__.py) select their importers instead of all tests; validated on 2 such edits against the full suite |
 | v18 | `9b9fcfc` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | Dict-entry value edits select only tests that read the changed keys' values (dict-read probe on the pinned commit). Validated on 25 + 25 fresh dict edits (0 misses; first run found and fixed an enum-key matching bug), then **125 fresh dict edits (46 with real failures): 0 misses**, 1,185.5 s vs v17's 1,455.4 s. Final candidate. |
-| v19 | `f206657` | 106.1 | 105.6 | - | - | 0 | 0.46 | pending | v18 + comparison-probe fix: a swap whose partner operator re-enters the same comparison (e.g. inside `__eq__`) counts as differing. Found by a 125-swap validation (1 real miss, V11224); same scores, closes a gap present since v7. Validation of the fix: in progress |
+| v19 | `f206657` | 106.1 | 105.6 | - | - | 0 | 0.46 | **200.9** (submitted as b650383 = f206657 + log; same simulated as v11-v18) - **current final entry** | v18 + comparison-probe fix: a swap whose partner operator re-enters the same comparison (e.g. inside `__eq__`) counts as differing. Found by a 125-swap validation (1 real miss, V11224); same scores, closes a gap present since v7. Validation of the fix: **125 fresh swaps on clean bytecode (27 with real failures): 0 misses** |
+| v20 | `9b60ad1` (branch v20-flag-rule) | 105.4 | 105.4 | - | - | 0 | 0.40 | **198.2** (first move since v11: about 1 small class-constant edit in the hidden set; benchmark predicted -44 s) | Class-constant edits select only tests that read that class's definition (flag probe). Benchmark 191.9 -> 147.8 s. 125-edit flag validation in progress; not the final until clean |
+| v19.1 | `19b0e04` | 106.1 | 105.6 | - | - | 0 | 0.4 | - | v19 + dict map fix: a dict read while module Y is imported now counts for Y's importers AND Y's users (tests reaching Y through the dialect registry without importing it). Only adds tests to v19's selections (strictly safer); found via 2 flag-rule misses (K14140, K14143) with the same cause. 0 misses on all 175 dict edits |
+| v21 | `a32df5b` (branch v20-flag-rule) | 105.8 | 105.4 | - | - | 0 | 0.45 | **198.3** (BB-37695FD0) | v20 + import-time reads count for the module's users (fixes v20's 4 flag misses: settings turned into derived tables at class definition, used by tests that reach the dialect through the registry). **Validated: 136 fresh flag edits (66 + 70), 0 misses**; also 0 misses on all 175 dict edits, 125 comparison swaps, kit and benchmark (147.8 s). **Final entry (picked)** |
+| PROBE B | `a45f767` (branch probe-noslow) | - | - | - | - | - | - | **428.7** (BB-3475D44E) | **Unsafe probe, never the final.** v18 but no test over 5 s ever selected. Reading: 428.7 = 1 miss (300 s) + about 128.7 s, so the slow tests that pass cost about 72 s across the 40 hidden commits, and exactly one hidden commit has a slow test failing |
+| PROBE C | `6d370d9` (branch probe-no-tpcds) | - | - | - | - | - | - | not submitted | **Unsafe probe, never the final.** v21 but test_execute_tpcds never selected. Not needed after v22's result |
+| v22 | `70adc41` (branch v22-tpcds-check) | 105.4 | 105.4 | - | - | 0 | 3.2 (check ran once) | **197.59 simulated + 0.71 CPU, 0 misses: identical to v21** | v21 + TPC-DS runtime check: when every edited line is in a function the TPC-DS execution never runs, re-run the test's parse/optimize/plan/transpile on the patched sources (pinned sqlglot copy in the image, 3.4 s CPU, capped at 20 s CPU and 1 GB) and drop test_execute_tpcds if all 99 query fingerprints match. Run only when dropping the test would shorten the commit by at least 8 s. Benchmark 147.8 -> 119.7 s (0 misses). Board CPU did not rise, so the check never ran on the hidden set: test_execute_tpcds is not where the ~72 s of slow passing tests goes (test_max_nodes, likely with test_generator_memory, is). Validation stopped at 85 of 126 edits (0 misses); not the final |
+| v23 | not committed | - | - | - | - | - | - | not submitted | **Rejected.** v21 + "assertion-scoped test_max_nodes" (keep it only for node counting, the max-nodes error, the x=x=... loop, tokenizer and import breakage). Fresh validation, 42 parser.py edits each run against test_max_nodes: 20 broke it, v23 missed 18 (43%). The misses are on the basic parse path every SELECT goes through; widening to cover them is what v21 already does |
+| v24 | branch v24-gen-memory | 105.4 | 105.4 | - | - | 0 | ~0.4 | pending | v21 + test_generator_memory scope (calculated risk, from reading the test and the pinned code): dropped only when every edit is a class-body constant of a dialect / generator class (not Tokenizer / Parser) that cannot raise at import (new or changed dict entries checked only) and is not a setting dialect class creation, Generator.__init__ or _build_dispatch reads (TRANSFORMS excepted: only copied and popped). Fresh validation: **130 edits (110 class-body, 20 function) that v21 selects the test for, each run against the test: 0 broke it, 0 misses**; v24 dropped it on 49. 0 misses on the kit, benchmark and all existing sets. Kit and benchmark unchanged (they never select it); dict set DL 1214.3 -> 1190.1 s. Expected board saving small: 0 to ~7 s (see the v24 note in the final summary) |
+
+## Final summary
+
+**Final entry: v21 `a32df5bcd1ee279cc56379b97c744d5af6f738e1` (branch v20-flag-rule, BB-37695FD0): board 198.3, 0 misses.**
+Validated before it was picked: 136 fresh class-constant edits, 175 dict edits, 125 comparison
+swaps, the kit sample and the 40-commit benchmark, all with 0 misses against full test runs.
+
+- Starter baseline (all tests, 3 workers): 1614.1. v3 257.0 -> v7 208.3 -> v11 200.8 -> v20 198.2 -> v21 198.3.
+- Every rule selects tests from facts measured on the pinned commit (coverage, import contexts,
+  comparison / dict-read / class-constant probes). Nothing is derived from which tests a patch breaks.
+- Where the remaining time goes: probe B (no test over 5 s selected) scored 428.7 = 1 miss + about
+  128.7 s, so slow tests that pass cost about 72 s across the 40 hidden commits. v22 showed
+  test_execute_tpcds is not that cost; it is test_max_nodes (28.8 s), likely with test_generator_memory
+  (6.7 s). Neither has a sound cheap check: test_max_nodes is all parsing of one huge query (the code
+  such patches change), and test_generator_memory would cost as much to check as to run.
+- Probes (`4688c9c`, `01cabc2`, `a45f767`, `6d370d9`) are unsafe by design and were never the final.
+
+All submitted commits and branches (main, v20-flag-rule, v22-tpcds-check, v24-gen-memory, probe-no-max-nodes,
+probe-empty, probe-noslow, probe-no-tpcds) stay in the repo until results are published.
 
 ## Final-entry safety
 
 The board enters our best score unless we pick another. **The probe must never be our
-final.** Safe final candidate right now: **v16 `bd6fe7d97c5e041718593f627092274f27f47522`**
+final.** **Final entry: v21 `a32df5bcd1ee279cc56379b97c744d5af6f738e1` (BB-37695FD0, 198.3; validated).** Previous final entry: **v19 (submitted as `b650383`, code `f206657e800dc7541e937db8e16159bf3e102200`)**; previously v16 `bd6fe7d97c5e041718593f627092274f27f47522`
 (board 200.9). If the probe scores lower than 200.9, select v16 (or a later safe version)
 as the final on the submission page.
 

@@ -1669,6 +1669,131 @@ class Selector:
         return sel
 
 
+# ------------------------------------------------------------------ test_generator_memory scope
+# CALCULATED RISK, derived only from reading tests/test_generator.py::TestGenerator::
+# test_generator_memory and the pinned code. For every dialect name the test
+#   1. calls Dialect.get_or_raise(name): imports the dialect module, which creates its
+#      classes (the _Dialect metaclass __new__ runs; module and class bodies execute);
+#   2. calls dialect.generator() 1100 times: Dialect.generator -> generator_class(**args),
+#      i.e. Generator.__init__ (plus the athena/bigquery generators' own __init__ and
+#      _generator_kwargs); the first call per class builds the dispatch table
+#      (_build_dispatch: dict(cls.TRANSFORMS) plus the *_sql methods) into _DISPATCH_CACHE;
+#   3. asserts that 1000 constructions retain < 1024 bytes (tracemalloc).
+# So it can only fail if a dialect import / class creation raises, construction raises, or
+# construction retains memory. Function bodies and module-level code keep the selection
+# the rules above made (they run during imports, metaclass work and import-time parsing).
+# This rule only drops the test when EVERY edited statement is a constant in a class body of
+# a dialect or generator class (not a Tokenizer / Parser class: their settings feed
+# tokenization and parsing at import), and each such statement
+#   * cannot raise at import where the old one did not (Selector._may_raise: literals,
+#     containers, lambdas and names the old value already used; for a dict literal only
+#     its new or changed entries are checked, see _gm_may_raise), and
+#   * assigns a name that neither the _Dialect metaclass, Dialect.__init__/get_or_raise/
+#     generator, Generator.__init__, the generators' __init__/_generator_kwargs nor
+#     _build_dispatch read (listed in GEN_MEMORY_READS below, collected from those function
+#     bodies with an AST pass), except TRANSFORMS: those only copy it (dict(...)) and pop
+#     keys from it, which never raises and builds the per-class table once (cached), so a
+#     changed entry does not change what a construction retains;
+#   * does not mention _DISPATCH_CACHE, __slots__ or SELECT_KINDS (the test's own comment
+#     names leaked SELECT_KINDS tuples as the failure it guards against).
+GEN_MEMORY_ID = "tests/test_generator.py::TestGenerator::test_generator_memory"
+GEN_MEMORY_READS = {
+    "BIT_END", "BIT_START", "BIT_STRING", "BYTE_END", "BYTE_START", "BYTE_STRING",
+    "BYTE_STRINGS_SUPPORT_ESCAPED_SEQUENCES", "BYTE_STRING_ESCAPES", "CREATABLE_KIND_MAPPING",
+    "DATE_PART_MAPPING", "ESCAPED_SEQUENCES", "EXPR_CLASSES", "FORMAT_MAPPING", "FORMAT_TRIE",
+    "HEX_END", "HEX_START", "HEX_STRING", "IDENTIFIER_END", "IDENTIFIER_ESCAPED_SEQUENCES",
+    "IDENTIFIER_ESCAPES", "IDENTIFIER_START", "INITCAP_SUPPORTS_CUSTOM_DELIMITERS",
+    "INVERSE_CREATABLE_KIND_MAPPING", "INVERSE_FORMAT_MAPPING", "INVERSE_FORMAT_TRIE",
+    "INVERSE_TIME_MAPPING", "INVERSE_TIME_TRIE", "KEYWORDS", "NORMALIZATION_STRATEGY",
+    "NORMALIZE_FUNCTIONS", "NUMERIC_ESCAPES", "QUOTE_END", "QUOTE_START",
+    "STRINGS_SUPPORT_ESCAPED_SEQUENCES", "STRING_ESCAPES", "SUPPORTED_JSON_PATH_PARTS",
+    "SUPPORTED_SETTINGS", "SUPPORTS_COLUMN_JOIN_MARKS", "TIME_MAPPING", "TIME_TRIE",
+    "UNESCAPED_SEQUENCES", "UNICODE_END", "UNICODE_START", "UNICODE_STRING",
+    "VALID_INTERVAL_UNITS", "_FORMAT_STRINGS", "_IDENTIFIERS", "_QUOTES",
+    "generator_class", "tokenizer_class", "parser_class", "jsonpath_tokenizer_class",
+}
+GEN_MEMORY_WORDS = ("_DISPATCH_CACHE", "__slots__", "SELECT_KINDS")
+GEN_MEMORY_FILES = ("sqlglot/generator.py", "sqlglot/dialects/", "sqlglot/generators/")
+GEN_MEMORY_KEEP_CLASSES = {"Tokenizer", "JSONPathTokenizer", "Parser"}
+
+
+def _class_body_only(tree, lines) -> bool:
+    """True if every line is in a class body statement that is not (inside) a function,
+    and not a class header."""
+    import ast
+
+    for line in lines:
+        best = None
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                start = min([n.lineno] + [d.lineno for d in n.decorator_list])
+                if start <= line <= n.end_lineno and (best is None or n.lineno >= best.lineno):
+                    best = n
+        if not isinstance(best, ast.ClassDef):
+            return False  # module level, or inside a function
+        if not best.body or line < best.body[0].lineno:
+            return False  # the class header (bases, keywords, decorators)
+    return True
+
+
+def _gm_may_raise(sel, old, new) -> bool:
+    """Selector._may_raise, except that for a dict literal assigned to the same target only
+    the entries that are new or changed are checked: an entry identical (same key and value
+    expressions) to one in the old dict was already evaluated at import without raising, and
+    removing an entry evaluates nothing new. A {**X, ...} spread counts as an entry."""
+    import ast
+
+    if (isinstance(old, ast.Assign) and isinstance(new, ast.Assign)
+            and [ast.dump(t) for t in old.targets] == [ast.dump(t) for t in new.targets]
+            and isinstance(old.value, ast.Dict) and isinstance(new.value, ast.Dict)):
+        seen = {(ast.dump(k) if k is not None else None, ast.dump(v)) for k, v in zip(old.value.keys, old.value.values)}
+        fresh = [(k, v) for k, v in zip(new.value.keys, new.value.values)
+                 if (ast.dump(k) if k is not None else None, ast.dump(v)) not in seen]
+        if not fresh:
+            return False
+        probe = ast.Assign(targets=new.targets, value=ast.Dict(keys=[k for k, _ in fresh], values=[v for _, v in fresh]))
+        return sel._may_raise(old, probe)
+    return sel._may_raise(old, new)
+
+
+def gen_memory_needed(sel, changes) -> bool:
+    import ast
+
+    for ch in changes:
+        path = ch.new if ch.added else ch.old
+        if ch.added or ch.deleted:
+            return True
+        texts = [x for _, removed, added in ch.blocks for x in removed + added]
+        if any(w in x for x in texts for w in GEN_MEMORY_WORDS):
+            return True
+        if not path.startswith(GEN_MEMORY_FILES):
+            # other files: keep whatever the rules above decided for this change alone
+            if sel.ids[GEN_MEMORY_ID] in sel.select([ch]):
+                return True
+            continue
+        sig = significant_lines(ch)
+        if sig is None:
+            return True  # does not compile
+        if not sig:
+            continue
+        tree = sel._tree(path)
+        if tree is None or not _class_body_only(tree, sig):
+            return True
+        pairs = sel._stmt_pairs(path, ch)
+        if not pairs:
+            return True  # cannot pair the statements: keep
+        for old, new, owner in pairs:
+            if not owner or owner[-1] in GEN_MEMORY_KEEP_CLASSES:
+                return True
+            if not isinstance(new, (ast.Assign, ast.AnnAssign)) or _gm_may_raise(sel, old, new):
+                return True
+            targets = new.targets if isinstance(new, ast.Assign) else [new.target]
+            for tg in targets:
+                if not isinstance(tg, ast.Name) or tg.id in GEN_MEMORY_READS:
+                    return True
+    return False
+
+
 def main():
     tests = json.loads((DATA / "tests.json").read_text())["tests"]
     dur = {t["number"]: round(t["seconds"] * 1000) for t in tests}
@@ -1676,7 +1801,12 @@ def main():
     out = []
     for p in sorted((DATA / "commits").glob("*.patch")):
         log(p.stem)
-        chosen = sel.select(parse_patch(p.read_text(encoding="utf-8", errors="replace")))
+        changes = parse_patch(p.read_text(encoding="utf-8", errors="replace"))
+        chosen = sel.select(changes)
+        gm = sel.ids.get(GEN_MEMORY_ID)
+        if gm in chosen and len(chosen) < len(sel.all) and not gen_memory_needed(sel, changes):
+            log("  test_generator_memory: class-constant edit that construction does not read -> dropped")
+            chosen.discard(gm)
         out.append(json.dumps({"commit": p.stem, "workers": split(sorted(chosen), dur)}))
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
 
